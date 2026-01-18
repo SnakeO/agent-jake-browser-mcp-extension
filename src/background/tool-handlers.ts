@@ -78,6 +78,21 @@ const schemas = {
   browser_highlight: z.object({
     ref: z.string(),
   }),
+
+  browser_evaluate: z.object({
+    code: z.string(),
+  }),
+
+  browser_resize_viewport: z.object({
+    width: z.number().int().min(320).max(3840),
+    height: z.number().int().min(200).max(2160),
+  }),
+
+  browser_upload_file: z.object({
+    ref: z.string().optional(),
+    selector: z.string().optional(),
+    filePath: z.string(),
+  }),
 };
 
 type ToolName = keyof typeof schemas;
@@ -391,6 +406,80 @@ export function createToolHandlers(tabManager: TabManager) {
       const selector = await getSelector(ref);
       await sendToContent('highlight', { selector });
       return { highlighted: ref };
+    },
+
+    browser_evaluate: async (payload) => {
+      const { code } = schemas.browser_evaluate.parse(payload);
+
+      // Use Runtime.evaluate via Chrome Debugger API
+      const result = await tabManager.sendDebuggerCommand<{
+        result: { type: string; value: unknown; description?: string };
+        exceptionDetails?: { text: string };
+      }>('Runtime.evaluate', {
+        expression: code,
+        returnByValue: true,
+      });
+
+      if (result.exceptionDetails) {
+        throw new Error(`JavaScript error: ${result.exceptionDetails.text}`);
+      }
+
+      return result.result.value;
+    },
+
+    browser_resize_viewport: async (payload) => {
+      const { width, height } = schemas.browser_resize_viewport.parse(payload);
+
+      // Use Emulation.setDeviceMetricsOverride to set viewport
+      await tabManager.sendDebuggerCommand('Emulation.setDeviceMetricsOverride', {
+        width,
+        height,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+
+      return { width, height };
+    },
+
+    browser_upload_file: async (payload) => {
+      const { ref, selector, filePath } = schemas.browser_upload_file.parse(payload);
+
+      // Get the selector for the file input
+      let targetSelector = selector;
+      if (!targetSelector && ref) {
+        targetSelector = await getSelector(ref);
+      }
+
+      if (!targetSelector) {
+        throw new Error('Either ref or selector must be provided');
+      }
+
+      // Get the document root
+      const doc = await tabManager.sendDebuggerCommand<{ root: { nodeId: number } }>(
+        'DOM.getDocument',
+        {}
+      );
+
+      // Find the file input element
+      const node = await tabManager.sendDebuggerCommand<{ nodeId: number }>(
+        'DOM.querySelector',
+        {
+          nodeId: doc.root.nodeId,
+          selector: targetSelector,
+        }
+      );
+
+      if (!node.nodeId) {
+        throw new Error(`Element not found: ${targetSelector}`);
+      }
+
+      // Set the file on the input
+      await tabManager.sendDebuggerCommand('DOM.setFileInputFiles', {
+        nodeId: node.nodeId,
+        files: [filePath],
+      });
+
+      return { uploaded: true, filePath };
     },
   };
 
