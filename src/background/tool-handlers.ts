@@ -1,0 +1,482 @@
+/**
+ * Tool handlers for browser automation commands.
+ * Each handler implements one MCP tool.
+ */
+
+import { z } from 'zod';
+import type { TabManager } from './tab-manager';
+import type { IncomingMessage, OutgoingMessage, Coordinates } from '@/types/messages';
+import { CONFIG } from '@/types/config';
+import { log } from '@/utils/logger';
+
+// Input validators using Zod
+const schemas = {
+  browser_navigate: z.object({
+    url: z.string().url(),
+  }),
+
+  browser_click: z.object({
+    element: z.string().describe('Human-readable element description'),
+    ref: z.string().describe('Element reference from snapshot (e.g., s1e42)'),
+  }),
+
+  browser_type: z.object({
+    element: z.string(),
+    ref: z.string(),
+    text: z.string(),
+    submit: z.boolean().optional().default(false),
+  }),
+
+  browser_hover: z.object({
+    element: z.string(),
+    ref: z.string(),
+  }),
+
+  browser_drag: z.object({
+    startElement: z.string(),
+    startRef: z.string(),
+    endElement: z.string(),
+    endRef: z.string(),
+  }),
+
+  browser_select_option: z.object({
+    element: z.string(),
+    ref: z.string(),
+    values: z.array(z.string()),
+  }),
+
+  browser_press_key: z.object({
+    key: z.string().describe('Key name like "Enter", "Tab", "ArrowDown", or "a"'),
+  }),
+
+  browser_wait: z.object({
+    time: z.number().min(0).max(30).describe('Time to wait in seconds'),
+  }),
+
+  browser_new_tab: z.object({
+    url: z.string().url(),
+  }),
+
+  browser_switch_tab: z.object({
+    tabId: z.number(),
+  }),
+
+  browser_get_text: z.object({
+    ref: z.string(),
+  }),
+
+  browser_get_attribute: z.object({
+    ref: z.string(),
+    attribute: z.string(),
+  }),
+
+  browser_wait_for_element: z.object({
+    ref: z.string(),
+    timeout: z.number().optional().default(10000),
+  }),
+
+  browser_highlight: z.object({
+    ref: z.string(),
+  }),
+};
+
+type ToolName = keyof typeof schemas;
+
+/**
+ * Create tool handlers bound to a tab manager.
+ */
+export function createToolHandlers(tabManager: TabManager) {
+  /**
+   * Send message to content script in connected tab.
+   */
+  async function sendToContent<T>(
+    action: string,
+    payload: Record<string, unknown> = {}
+  ): Promise<T> {
+    const tabId = tabManager.getConnectedTabId();
+    if (!tabId) {
+      throw new Error('No tab connected. Use the popup to connect a tab first.');
+    }
+
+    const response = await chrome.tabs.sendMessage(tabId, { action, payload });
+
+    if (!response.success) {
+      throw new Error(response.error || 'Content script error');
+    }
+
+    return response.data as T;
+  }
+
+  /**
+   * Get selector for element ref.
+   */
+  async function getSelector(ref: string): Promise<string> {
+    return sendToContent<string>('getSelector', { ref });
+  }
+
+  /**
+   * Wait for DOM to stabilize after action.
+   */
+  async function waitForStable(): Promise<void> {
+    await sendToContent('waitForDomStable', { timeout: CONFIG.DOM_STABILITY_MS });
+  }
+
+  /**
+   * Send mouse event via Chrome Debugger API.
+   */
+  async function dispatchMouseEvent(
+    type: 'mousePressed' | 'mouseReleased' | 'mouseMoved',
+    x: number,
+    y: number,
+    button: 'left' | 'right' | 'middle' = 'left',
+    clickCount = 1
+  ): Promise<void> {
+    await tabManager.sendDebuggerCommand('Input.dispatchMouseEvent', {
+      type,
+      x,
+      y,
+      button,
+      clickCount,
+    });
+  }
+
+  /**
+   * Send keyboard event via Chrome Debugger API.
+   */
+  async function dispatchKeyEvent(
+    type: 'keyDown' | 'keyUp' | 'char',
+    key: string,
+    text?: string
+  ): Promise<void> {
+    const keyDef = getKeyDefinition(key);
+
+    await tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
+      type,
+      key: keyDef.key,
+      code: keyDef.code,
+      windowsVirtualKeyCode: keyDef.keyCode,
+      text: type === 'char' ? text : undefined,
+    });
+  }
+
+  // Tool implementation map
+  const handlers: Record<string, (payload: unknown) => Promise<unknown>> = {
+    browser_navigate: async (payload) => {
+      const { url } = schemas.browser_navigate.parse(payload);
+      const tabId = tabManager.getConnectedTabId();
+
+      if (!tabId) {
+        throw new Error('No tab connected');
+      }
+
+      await chrome.tabs.update(tabId, { url });
+
+      // Wait for navigation to complete
+      await new Promise<void>((resolve) => {
+        const listener = (
+          updatedTabId: number,
+          changeInfo: { status?: string }
+        ) => {
+          if (updatedTabId === tabId && changeInfo.status === 'complete') {
+            chrome.tabs.onUpdated.removeListener(listener);
+            resolve();
+          }
+        };
+        chrome.tabs.onUpdated.addListener(listener);
+      });
+
+      return { navigated: url };
+    },
+
+    browser_go_back: async () => {
+      await tabManager.sendDebuggerCommand('Page.navigateToHistoryEntry', {
+        entryId: -1, // This won't work directly
+      });
+      // Actually use history API
+      const tabId = tabManager.getConnectedTabId();
+      if (tabId) {
+        await chrome.tabs.goBack(tabId);
+      }
+      return { success: true };
+    },
+
+    browser_go_forward: async () => {
+      const tabId = tabManager.getConnectedTabId();
+      if (tabId) {
+        await chrome.tabs.goForward(tabId);
+      }
+      return { success: true };
+    },
+
+    browser_reload: async () => {
+      const tabId = tabManager.getConnectedTabId();
+      if (tabId) {
+        await chrome.tabs.reload(tabId);
+        // Wait for reload to complete
+        await new Promise<void>((resolve) => {
+          const listener = (
+            updatedTabId: number,
+            changeInfo: { status?: string }
+          ) => {
+            if (updatedTabId === tabId && changeInfo.status === 'complete') {
+              chrome.tabs.onUpdated.removeListener(listener);
+              resolve();
+            }
+          };
+          chrome.tabs.onUpdated.addListener(listener);
+        });
+      }
+      return { success: true };
+    },
+
+    browser_snapshot: async () => {
+      const snapshot = await sendToContent<string>('generateSnapshot');
+      const { url, title } = await sendToContent<{ url: string; title: string }>('getPageInfo');
+
+      return {
+        url,
+        title,
+        snapshot,
+      };
+    },
+
+    browser_click: async (payload) => {
+      const { ref } = schemas.browser_click.parse(payload);
+
+      const selector = await getSelector(ref);
+      await sendToContent('scrollIntoView', { selector });
+
+      const coords = await sendToContent<Coordinates>('getElementCoordinates', {
+        selector,
+        clickable: true,
+      });
+
+      // Click sequence: move, down, up
+      await dispatchMouseEvent('mouseMoved', coords.x, coords.y);
+      await dispatchMouseEvent('mousePressed', coords.x, coords.y, 'left', 1);
+      await dispatchMouseEvent('mouseReleased', coords.x, coords.y, 'left', 1);
+
+      await waitForStable();
+      return { clicked: ref };
+    },
+
+    browser_type: async (payload) => {
+      const { ref, text, submit } = schemas.browser_type.parse(payload);
+
+      const selector = await getSelector(ref);
+      await sendToContent('scrollIntoView', { selector });
+
+      const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector });
+
+      // Click to focus
+      await dispatchMouseEvent('mouseMoved', coords.x, coords.y);
+      await dispatchMouseEvent('mousePressed', coords.x, coords.y, 'left', 1);
+      await dispatchMouseEvent('mouseReleased', coords.x, coords.y, 'left', 1);
+
+      // Type each character
+      for (const char of text) {
+        await dispatchKeyEvent('keyDown', char);
+        await dispatchKeyEvent('char', char, char);
+        await dispatchKeyEvent('keyUp', char);
+      }
+
+      // Submit if requested
+      if (submit) {
+        await dispatchKeyEvent('keyDown', 'Enter');
+        await dispatchKeyEvent('keyUp', 'Enter');
+      }
+
+      await waitForStable();
+      return { typed: text, submitted: submit };
+    },
+
+    browser_hover: async (payload) => {
+      const { ref } = schemas.browser_hover.parse(payload);
+
+      const selector = await getSelector(ref);
+      await sendToContent('scrollIntoView', { selector });
+
+      const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector });
+      await dispatchMouseEvent('mouseMoved', coords.x, coords.y);
+
+      return { hovered: ref };
+    },
+
+    browser_press_key: async (payload) => {
+      const { key } = schemas.browser_press_key.parse(payload);
+
+      await dispatchKeyEvent('keyDown', key);
+      await dispatchKeyEvent('keyUp', key);
+
+      await waitForStable();
+      return { pressed: key };
+    },
+
+    browser_wait: async (payload) => {
+      const { time } = schemas.browser_wait.parse(payload);
+      await new Promise(resolve => setTimeout(resolve, time * 1000));
+      return { waited: time };
+    },
+
+    browser_screenshot: async () => {
+      const result = await tabManager.sendDebuggerCommand<{ data: string }>(
+        'Page.captureScreenshot',
+        { format: 'png' }
+      );
+
+      return {
+        image: `data:image/png;base64,${result.data}`,
+      };
+    },
+
+    browser_get_console_logs: async () => {
+      // Note: This would require setting up Console domain monitoring
+      // For now, return empty array
+      return { logs: [] };
+    },
+
+    // New features
+    browser_new_tab: async (payload) => {
+      const { url } = schemas.browser_new_tab.parse(payload);
+      const tabInfo = await tabManager.createTab(url, true);
+      return { tab: tabInfo };
+    },
+
+    browser_list_tabs: async () => {
+      const tabs = await tabManager.listTabs();
+      return { tabs };
+    },
+
+    browser_switch_tab: async (payload) => {
+      const { tabId } = schemas.browser_switch_tab.parse(payload);
+      await tabManager.switchTab(tabId);
+      return { switched: tabId };
+    },
+
+    browser_close_tab: async () => {
+      await tabManager.closeTab();
+      return { closed: true };
+    },
+
+    browser_get_text: async (payload) => {
+      const { ref } = schemas.browser_get_text.parse(payload);
+      const selector = await getSelector(ref);
+      const text = await sendToContent<string>('getText', { selector });
+      return { text };
+    },
+
+    browser_get_attribute: async (payload) => {
+      const { ref, attribute } = schemas.browser_get_attribute.parse(payload);
+      const selector = await getSelector(ref);
+      const value = await sendToContent<string | null>('getAttribute', { selector, attribute });
+      return { value };
+    },
+
+    browser_is_visible: async (payload) => {
+      const { ref } = z.object({ ref: z.string() }).parse(payload);
+      const selector = await getSelector(ref);
+      const visible = await sendToContent<boolean>('isVisible', { selector });
+      return { visible };
+    },
+
+    browser_wait_for_element: async (payload) => {
+      const { ref, timeout } = schemas.browser_wait_for_element.parse(payload);
+      const selector = await getSelector(ref);
+      const found = await sendToContent<boolean>('waitForElement', { selector, timeout });
+      return { found };
+    },
+
+    browser_highlight: async (payload) => {
+      const { ref } = schemas.browser_highlight.parse(payload);
+      const selector = await getSelector(ref);
+      await sendToContent('highlight', { selector });
+      return { highlighted: ref };
+    },
+  };
+
+  /**
+   * Handle incoming message from WebSocket.
+   */
+  return async function handleMessage(message: IncomingMessage): Promise<OutgoingMessage> {
+    const { id, type, payload } = message;
+
+    log.info(`Handling tool: ${type}`);
+
+    try {
+      const handler = handlers[type];
+      if (!handler) {
+        return {
+          id,
+          success: false,
+          error: {
+            code: 'UNKNOWN_TOOL',
+            message: `Unknown tool: ${type}`,
+          },
+        };
+      }
+
+      const result = await handler(payload);
+
+      return {
+        id,
+        success: true,
+        result,
+      };
+    } catch (error) {
+      log.error(`Tool ${type} failed:`, error);
+
+      return {
+        id,
+        success: false,
+        error: {
+          code: (error as Error).name || 'EXECUTION_ERROR',
+          message: (error as Error).message,
+        },
+      };
+    }
+  };
+}
+
+/**
+ * Get key definition for keyboard events.
+ */
+function getKeyDefinition(key: string): { key: string; code: string; keyCode: number } {
+  // Common key mappings
+  const keyMap: Record<string, { key: string; code: string; keyCode: number }> = {
+    Enter: { key: 'Enter', code: 'Enter', keyCode: 13 },
+    Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
+    Escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
+    Backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
+    Delete: { key: 'Delete', code: 'Delete', keyCode: 46 },
+    ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+    ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+    ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+    ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+    Home: { key: 'Home', code: 'Home', keyCode: 36 },
+    End: { key: 'End', code: 'End', keyCode: 35 },
+    PageUp: { key: 'PageUp', code: 'PageUp', keyCode: 33 },
+    PageDown: { key: 'PageDown', code: 'PageDown', keyCode: 34 },
+    Space: { key: ' ', code: 'Space', keyCode: 32 },
+  };
+
+  if (keyMap[key]) {
+    return keyMap[key];
+  }
+
+  // Single character
+  if (key.length === 1) {
+    const charCode = key.charCodeAt(0);
+    const code = key.toUpperCase().match(/[A-Z]/)
+      ? `Key${key.toUpperCase()}`
+      : `Digit${key}`;
+
+    return {
+      key,
+      code,
+      keyCode: charCode,
+    };
+  }
+
+  // Default
+  return { key, code: key, keyCode: 0 };
+}

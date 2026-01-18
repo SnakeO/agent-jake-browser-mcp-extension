@@ -1,0 +1,315 @@
+/**
+ * Content script entry point.
+ * Runs in the context of web pages and handles DOM interactions.
+ */
+
+import {
+  generateSnapshot,
+  getCurrentSnapshot,
+  getElementByRef,
+  formatSnapshotAsText,
+} from './aria-tree';
+import {
+  buildSelector,
+  findElement,
+  getElementCenter,
+  scrollIntoView,
+  isElementVisible,
+  isElementClickable,
+} from './selector';
+import type { ContentScriptRequest, ContentScriptResponse, Coordinates } from '@/types/messages';
+import { CONFIG } from '@/types/config';
+
+// Visual highlight overlay
+let highlightOverlay: HTMLDivElement | null = null;
+
+/**
+ * Handle messages from background script.
+ */
+chrome.runtime.onMessage.addListener(
+  (
+    request: ContentScriptRequest,
+    _sender: chrome.runtime.MessageSender,
+    sendResponse: (response: ContentScriptResponse) => void
+  ) => {
+    handleRequest(request)
+      .then(result => sendResponse({ success: true, data: result }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+
+    // Return true to indicate async response
+    return true;
+  }
+);
+
+/**
+ * Route request to appropriate handler.
+ */
+async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
+  const { action, payload } = request;
+
+  switch (action) {
+    case 'generateSnapshot':
+      return handleGenerateSnapshot();
+
+    case 'getSelector':
+      return handleGetSelector(payload as { ref: string });
+
+    case 'getElementCoordinates':
+      return handleGetElementCoordinates(payload as { selector: string; clickable?: boolean });
+
+    case 'scrollIntoView':
+      return handleScrollIntoView(payload as { selector: string });
+
+    case 'selectOption':
+      return handleSelectOption(payload as { selector: string; values: string[] });
+
+    case 'getText':
+      return handleGetText(payload as { selector: string });
+
+    case 'getAttribute':
+      return handleGetAttribute(payload as { selector: string; attribute: string });
+
+    case 'isVisible':
+      return handleIsVisible(payload as { selector: string });
+
+    case 'waitForElement':
+      return handleWaitForElement(payload as { selector: string; timeout?: number });
+
+    case 'highlight':
+      return handleHighlight(payload as { selector: string });
+
+    case 'waitForDomStable':
+      return handleWaitForDomStable(payload as { timeout?: number });
+
+    case 'getPageInfo':
+      return handleGetPageInfo();
+
+    default:
+      throw new Error(`Unknown action: ${action}`);
+  }
+}
+
+/**
+ * Generate accessibility snapshot.
+ */
+function handleGenerateSnapshot(): string {
+  const snapshot = generateSnapshot();
+  return formatSnapshotAsText(snapshot);
+}
+
+/**
+ * Get CSS selector for an element ref.
+ */
+function handleGetSelector(payload: { ref: string }): string {
+  const element = getElementByRef(payload.ref);
+  if (!element) {
+    const snapshot = getCurrentSnapshot();
+    if (!snapshot) {
+      throw new Error('No snapshot available. Generate a snapshot first.');
+    }
+
+    const refMatch = payload.ref.match(/^s(\d+)e/);
+    if (refMatch && parseInt(refMatch[1], 10) !== snapshot.generation) {
+      throw new Error(
+        `Stale element reference. Snapshot generation is ${snapshot.generation}, ` +
+        `but ref is from generation ${refMatch[1]}. Regenerate snapshot.`
+      );
+    }
+
+    throw new Error(`Element not found for ref: ${payload.ref}`);
+  }
+
+  return buildSelector(element);
+}
+
+/**
+ * Get center coordinates of an element.
+ */
+async function handleGetElementCoordinates(
+  payload: { selector: string; clickable?: boolean }
+): Promise<Coordinates> {
+  const element = await findElement(payload.selector, {
+    visible: true,
+    clickable: payload.clickable,
+  });
+
+  return getElementCenter(element);
+}
+
+/**
+ * Scroll element into view.
+ */
+async function handleScrollIntoView(payload: { selector: string }): Promise<void> {
+  const element = await findElement(payload.selector, { visible: false });
+  await scrollIntoView(element);
+}
+
+/**
+ * Select option(s) in a dropdown.
+ */
+async function handleSelectOption(
+  payload: { selector: string; values: string[] }
+): Promise<void> {
+  const element = await findElement(payload.selector);
+
+  if (!(element instanceof HTMLSelectElement)) {
+    throw new Error('Element is not a <select>');
+  }
+
+  const select = element;
+  const valuesToSelect = select.multiple ? payload.values : [payload.values[0]];
+
+  // Clear previous selection if single-select
+  if (!select.multiple) {
+    select.value = '';
+  }
+
+  for (const value of valuesToSelect) {
+    const option = Array.from(select.options).find(
+      opt => opt.value === value || opt.textContent?.trim() === value
+    );
+
+    if (!option) {
+      throw new Error(`Option not found: ${value}`);
+    }
+
+    option.selected = true;
+  }
+
+  // Dispatch events
+  select.dispatchEvent(new Event('input', { bubbles: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/**
+ * Get text content of an element.
+ */
+async function handleGetText(payload: { selector: string }): Promise<string> {
+  const element = await findElement(payload.selector);
+  return element.textContent?.trim() || '';
+}
+
+/**
+ * Get attribute value of an element.
+ */
+async function handleGetAttribute(
+  payload: { selector: string; attribute: string }
+): Promise<string | null> {
+  const element = await findElement(payload.selector);
+  return element.getAttribute(payload.attribute);
+}
+
+/**
+ * Check if element is visible.
+ */
+async function handleIsVisible(payload: { selector: string }): Promise<boolean> {
+  try {
+    const element = document.querySelector(payload.selector);
+    if (!element) {
+      return false;
+    }
+    return isElementVisible(element);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Wait for element to appear.
+ */
+async function handleWaitForElement(
+  payload: { selector: string; timeout?: number }
+): Promise<boolean> {
+  try {
+    await findElement(payload.selector, {
+      timeout: payload.timeout || CONFIG.ELEMENT_WAIT_TIMEOUT_MS,
+      visible: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Highlight an element visually (for debugging).
+ */
+async function handleHighlight(payload: { selector: string }): Promise<void> {
+  // Remove previous highlight
+  if (highlightOverlay) {
+    highlightOverlay.remove();
+    highlightOverlay = null;
+  }
+
+  const element = await findElement(payload.selector);
+  const rect = element.getBoundingClientRect();
+
+  highlightOverlay = document.createElement('div');
+  highlightOverlay.style.cssText = `
+    position: fixed;
+    top: ${rect.top}px;
+    left: ${rect.left}px;
+    width: ${rect.width}px;
+    height: ${rect.height}px;
+    border: 3px solid #ff4444;
+    background: rgba(255, 68, 68, 0.2);
+    pointer-events: none;
+    z-index: 2147483647;
+    transition: all 0.2s ease;
+  `;
+
+  document.body.appendChild(highlightOverlay);
+
+  // Remove after 2 seconds
+  setTimeout(() => {
+    if (highlightOverlay) {
+      highlightOverlay.remove();
+      highlightOverlay = null;
+    }
+  }, 2000);
+}
+
+/**
+ * Wait for DOM to stabilize (no mutations for a period).
+ */
+function handleWaitForDomStable(payload: { timeout?: number }): Promise<void> {
+  const timeout = payload.timeout || CONFIG.DOM_STABILITY_MS;
+
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout>;
+
+    const observer = new MutationObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        observer.disconnect();
+        resolve();
+      }, timeout);
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+
+    // Start the timer immediately
+    timer = setTimeout(() => {
+      observer.disconnect();
+      resolve();
+    }, timeout);
+  });
+}
+
+/**
+ * Get page information.
+ */
+function handleGetPageInfo(): { url: string; title: string } {
+  return {
+    url: window.location.href,
+    title: document.title,
+  };
+}
+
+// Log that content script is loaded
+console.log('[AgentJake] Content script loaded');

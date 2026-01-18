@@ -1,0 +1,35 @@
+{
+  "name": "agent-jake-browser-mcp-extension",
+  "version": "1.0.0",
+  "description": "Browser automation extension for AI agents via Model Context Protocol",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "chrome-extension",
+    "browser-automation",
+    "mcp",
+    "ai"
+  ],
+  "author": "Agent Jake",
+  "license": "MIT",
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.33",
+    "@playwright/test": "^1.57.0",
+    "@types/chrome": "^0.1.33",
+    "@types/node": "^25.0.9",
+    "playwright": "^1.57.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  },
+  "dependencies": {
+    "sharp": "^0.34.5",
+    "zod": "^4.3.5"
+  }
+}

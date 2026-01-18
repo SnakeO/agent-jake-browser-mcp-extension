@@ -1,0 +1,106 @@
+/**
+ * Message types for communication between extension components
+ * and the browser-mcp WebSocket server.
+ */
+
+// Tool names exposed via MCP
+export type ToolName =
+  | 'browser_navigate'
+  | 'browser_go_back'
+  | 'browser_go_forward'
+  | 'browser_snapshot'
+  | 'browser_click'
+  | 'browser_type'
+  | 'browser_hover'
+  | 'browser_drag'
+  | 'browser_select_option'
+  | 'browser_press_key'
+  | 'browser_wait'
+  | 'browser_screenshot'
+  | 'browser_get_console_logs'
+  // New tools (improvements)
+  | 'browser_new_tab'
+  | 'browser_list_tabs'
+  | 'browser_switch_tab'
+  | 'browser_close_tab'
+  | 'browser_get_text'
+  | 'browser_get_attribute'
+  | 'browser_is_visible'
+  | 'browser_wait_for_element'
+  | 'browser_highlight';
+
+// Messages from browser-mcp server
+export interface IncomingMessage {
+  id: string;
+  type: ToolName;
+  payload: Record<string, unknown>;
+}
+
+// Response back to browser-mcp server
+export interface OutgoingMessage {
+  id: string;
+  success: boolean;
+  result?: unknown;
+  error?: {
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+  };
+}
+
+// Internal messages between background and content scripts
+export interface ContentScriptRequest {
+  action: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ContentScriptResponse {
+  success: boolean;
+  data?: unknown;
+  error?: string;
+}
+
+// ARIA tree node representation
+export interface AriaNode {
+  role: string;
+  name: string;
+  ref: string;
+  children: (AriaNode | string)[];
+  props: Record<string, unknown>;
+  checked?: boolean | 'mixed';
+  disabled?: boolean;
+  expanded?: boolean;
+  selected?: boolean;
+  level?: number;
+}
+
+// Snapshot metadata
+export interface Snapshot {
+  generation: number;
+  elements: Map<number, Element>;
+  root: AriaNode;
+  timestamp: number;
+}
+
+// Tab info for tab management
+export interface TabInfo {
+  id: number;
+  url: string;
+  title: string;
+  active: boolean;
+  connected: boolean;
+}
+
+// Viewport coordinates
+export interface Coordinates {
+  x: number;
+  y: number;
+}
+
+// Element bounding box
+export interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
