@@ -5,6 +5,7 @@
 
 import { CONFIG } from '@/types/config';
 import { log } from '@/utils/logger';
+import { logConnection, logError } from './activity-log';
 import type { IncomingMessage, OutgoingMessage } from '@/types/messages';
 
 type MessageHandler = (message: IncomingMessage) => Promise<OutgoingMessage>;
@@ -61,6 +62,7 @@ export class WebSocketClient {
           log.info('WebSocket connected');
           this.isConnecting = false;
           this.reconnectAttempts = 0;
+          logConnection('ws_connect', `Connected to browser-mcp on port ${this.port}`, true, { port: this.port });
           resolve();
         };
 
@@ -68,12 +70,14 @@ export class WebSocketClient {
           log.info(`WebSocket closed: ${event.code} ${event.reason}`);
           this.isConnecting = false;
           this.socket = null;
+          logConnection('ws_close', `WebSocket closed: ${event.code} ${event.reason || 'No reason'}`, true, { code: event.code, reason: event.reason });
           this.handleDisconnect();
         };
 
         this.socket.onerror = (error) => {
           log.error('WebSocket error:', error);
           this.isConnecting = false;
+          logError('ws_error', 'WebSocket connection error', { error: String(error) });
           if (this.reconnectAttempts === 0) {
             reject(new Error('Failed to connect to browser-mcp'));
           }
@@ -106,6 +110,7 @@ export class WebSocketClient {
     }
 
     // Reject all pending requests
+    const pendingCount = this.pendingRequests.size;
     for (const [id, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout);
       pending.reject(new Error('WebSocket disconnected'));
@@ -113,6 +118,7 @@ export class WebSocketClient {
     this.pendingRequests.clear();
 
     log.info('Disconnected');
+    logConnection('ws_disconnect', 'WebSocket disconnected by client', true, { pendingRequestsCancelled: pendingCount });
   }
 
   /**
@@ -174,6 +180,7 @@ export class WebSocketClient {
 
     if (this.reconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) {
       log.error('Max reconnect attempts reached');
+      logError('ws_reconnect_failed', `Max reconnect attempts reached (${CONFIG.MAX_RECONNECT_ATTEMPTS})`, { attempts: this.reconnectAttempts, maxAttempts: CONFIG.MAX_RECONNECT_ATTEMPTS });
       return;
     }
 
@@ -181,6 +188,7 @@ export class WebSocketClient {
     const delay = CONFIG.RECONNECT_INTERVAL_MS * this.reconnectAttempts;
 
     log.info(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+    logConnection('ws_reconnecting', `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`, true, { attempt: this.reconnectAttempts, delayMs: delay });
 
     this.reconnectTimer = setTimeout(() => {
       this.connect().catch(error => {

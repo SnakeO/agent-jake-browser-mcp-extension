@@ -6,6 +6,7 @@
 import { WebSocketClient } from './ws-client';
 import { TabManager } from './tab-manager';
 import { createToolHandlers } from './tool-handlers';
+import { activityLog } from './activity-log';
 import { log } from '@/utils/logger';
 import { CONFIG } from '@/types/config';
 
@@ -131,6 +132,25 @@ async function handlePopupMessage(message: {
     case 'disconnectTab': {
       await tabManager?.disconnectTab();
       wsClient?.disconnect();
+      return { success: true };
+    }
+
+    case 'getActivity': {
+      try {
+        const { limit } = (payload as { limit?: number }) || {};
+        if (limit) {
+          return await activityLog.getLatest(limit);
+        }
+        return await activityLog.getAll();
+      } catch (error) {
+        log.error('Failed to get activity:', error);
+        // Return empty response on error
+        return { activities: [], total: 0 };
+      }
+    }
+
+    case 'clearActivity': {
+      await activityLog.clear();
       return { success: true };
     }
 

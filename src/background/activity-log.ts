@@ -1,0 +1,155 @@
+/**
+ * Activity log singleton for tracking extension events.
+ * Persists to chrome.storage.local with FIFO eviction.
+ */
+
+import type { ActivityEntry, ActivityEntryInput, ActivityLogResponse } from '@/types/activity';
+
+const STORAGE_KEY = 'agent_jake_activity_log';
+const MAX_ENTRIES = 100;
+
+class ActivityLog {
+  private static instance: ActivityLog;
+  private cache: ActivityEntry[] | null = null;
+
+  private constructor() {
+    // Private constructor for singleton
+  }
+
+  static getInstance(): ActivityLog {
+    if (!ActivityLog.instance) {
+      ActivityLog.instance = new ActivityLog();
+    }
+    return ActivityLog.instance;
+  }
+
+  /**
+   * Add a new activity entry.
+   * Auto-generates id and timestamp.
+   */
+  async addEntry(input: ActivityEntryInput): Promise<ActivityEntry> {
+    const entry: ActivityEntry = {
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      ...input,
+    };
+
+    const entries = await this.loadEntries();
+    entries.unshift(entry); // Add to beginning (newest first)
+
+    // Enforce max entries (FIFO eviction)
+    if (entries.length > MAX_ENTRIES) {
+      entries.length = MAX_ENTRIES;
+    }
+
+    await this.saveEntries(entries);
+    return entry;
+  }
+
+  /**
+   * Get the latest N entries.
+   */
+  async getLatest(count: number = 5): Promise<ActivityLogResponse> {
+    const entries = await this.loadEntries();
+    return {
+      activities: entries.slice(0, count),
+      total: entries.length,
+    };
+  }
+
+  /**
+   * Get all entries.
+   */
+  async getAll(): Promise<ActivityLogResponse> {
+    const entries = await this.loadEntries();
+    return {
+      activities: entries,
+      total: entries.length,
+    };
+  }
+
+  /**
+   * Clear all entries.
+   */
+  async clear(): Promise<void> {
+    this.cache = [];
+    await chrome.storage.local.remove(STORAGE_KEY);
+  }
+
+  /**
+   * Load entries from storage.
+   */
+  private async loadEntries(): Promise<ActivityEntry[]> {
+    if (this.cache !== null) {
+      return this.cache;
+    }
+
+    try {
+      const result = await chrome.storage.local.get(STORAGE_KEY);
+      const stored = result[STORAGE_KEY];
+      this.cache = Array.isArray(stored) ? stored : [];
+      return this.cache;
+    } catch (error) {
+      console.error('[ActivityLog] Failed to load entries:', error);
+      this.cache = [];
+      return this.cache;
+    }
+  }
+
+  /**
+   * Save entries to storage.
+   */
+  private async saveEntries(entries: ActivityEntry[]): Promise<void> {
+    this.cache = entries;
+    try {
+      await chrome.storage.local.set({ [STORAGE_KEY]: entries });
+    } catch (error) {
+      console.error('[ActivityLog] Failed to save entries:', error);
+    }
+  }
+}
+
+// Export singleton instance
+export const activityLog = ActivityLog.getInstance();
+
+// Helper functions for common logging patterns
+export function logConnection(action: string, description: string, success: boolean, details?: Record<string, unknown>): Promise<ActivityEntry> {
+  return activityLog.addEntry({
+    type: 'connection',
+    action,
+    description,
+    success,
+    details,
+  });
+}
+
+export function logTab(action: string, description: string, success: boolean, details?: Record<string, unknown>): Promise<ActivityEntry> {
+  return activityLog.addEntry({
+    type: 'tab',
+    action,
+    description,
+    success,
+    details,
+  });
+}
+
+export function logTool(action: string, description: string, success: boolean, durationMs?: number, details?: Record<string, unknown>): Promise<ActivityEntry> {
+  return activityLog.addEntry({
+    type: 'tool',
+    action,
+    description,
+    success,
+    durationMs,
+    details,
+  });
+}
+
+export function logError(action: string, description: string, details?: Record<string, unknown>): Promise<ActivityEntry> {
+  return activityLog.addEntry({
+    type: 'error',
+    action,
+    description,
+    success: false,
+    details,
+  });
+}

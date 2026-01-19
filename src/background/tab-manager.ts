@@ -4,6 +4,7 @@
  */
 
 import { log } from '@/utils/logger';
+import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
 
 const STORAGE_KEY = 'connectedTabId';
@@ -47,16 +48,27 @@ export class TabManager {
 
     // Verify tab exists
     if (!await this.tabExists(tabId)) {
+      await logError('tab_connect', `Tab ${tabId} does not exist`, { tabId });
       throw new Error(`Tab ${tabId} does not exist`);
     }
 
-    // Attach debugger
-    await this.attachDebugger(tabId);
+    try {
+      // Attach debugger
+      await this.attachDebugger(tabId);
 
-    this.connectedTabId = tabId;
-    await chrome.storage.local.set({ [STORAGE_KEY]: tabId });
+      this.connectedTabId = tabId;
+      await chrome.storage.local.set({ [STORAGE_KEY]: tabId });
 
-    log.info(`Connected to tab: ${tabId}`);
+      // Get tab info for logging
+      const tab = await chrome.tabs.get(tabId);
+      const title = tab.title || tab.url || `Tab ${tabId}`;
+
+      log.info(`Connected to tab: ${tabId}`);
+      await logTab('tab_connect', `Connected to: ${title}`, true, { tabId, url: tab.url });
+    } catch (error) {
+      await logError('tab_connect', `Failed to connect: ${(error as Error).message}`, { tabId });
+      throw error;
+    }
   }
 
   /**
@@ -67,13 +79,15 @@ export class TabManager {
       return;
     }
 
+    const tabId = this.connectedTabId;
+
     await this.detachDebugger();
 
-    const tabId = this.connectedTabId;
     this.connectedTabId = null;
     await chrome.storage.local.remove(STORAGE_KEY);
 
     log.info(`Disconnected from tab: ${tabId}`);
+    await logTab('tab_disconnect', `Disconnected from tab ${tabId}`, true, { tabId });
   }
 
   /**
@@ -152,14 +166,21 @@ export class TabManager {
 
   /**
    * List all open tabs.
+   * Only marks a tab as "active" if it's the active tab in the last focused normal window.
    */
   async listTabs(): Promise<TabInfo[]> {
+    // Get the active tab in the last focused window (most reliable method)
+    const [currentTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const currentTabId = currentTab?.id;
+
     const tabs = await chrome.tabs.query({});
+
     return tabs.map(tab => ({
       id: tab.id!,
       url: tab.url || '',
       title: tab.title || '',
-      active: tab.active,
+      // Only mark the specific current tab as active
+      active: tab.id === currentTabId,
       connected: tab.id === this.connectedTabId,
     }));
   }

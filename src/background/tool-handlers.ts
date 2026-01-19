@@ -8,6 +8,7 @@ import type { TabManager } from './tab-manager';
 import type { IncomingMessage, OutgoingMessage, Coordinates } from '@/types/messages';
 import { CONFIG } from '@/types/config';
 import { log } from '@/utils/logger';
+import { logTool, logError } from './activity-log';
 
 // Input validators using Zod
 const schemas = {
@@ -488,12 +489,14 @@ export function createToolHandlers(tabManager: TabManager) {
    */
   return async function handleMessage(message: IncomingMessage): Promise<OutgoingMessage> {
     const { id, type, payload } = message;
+    const startTime = performance.now();
 
     log.info(`Handling tool: ${type}`);
 
     try {
       const handler = handlers[type];
       if (!handler) {
+        logError(type, `Unknown tool: ${type}`, { payload });
         return {
           id,
           success: false,
@@ -505,6 +508,11 @@ export function createToolHandlers(tabManager: TabManager) {
       }
 
       const result = await handler(payload);
+      const durationMs = Math.round(performance.now() - startTime);
+
+      // Create concise description based on tool type
+      const description = getToolDescription(type, payload, result);
+      logTool(type, description, true, durationMs, { payload, result });
 
       return {
         id,
@@ -512,7 +520,10 @@ export function createToolHandlers(tabManager: TabManager) {
         result,
       };
     } catch (error) {
+      const durationMs = Math.round(performance.now() - startTime);
       log.error(`Tool ${type} failed:`, error);
+
+      logTool(type, (error as Error).message, false, durationMs, { payload, error: (error as Error).message });
 
       return {
         id,
@@ -524,6 +535,47 @@ export function createToolHandlers(tabManager: TabManager) {
       };
     }
   };
+}
+
+/**
+ * Get a concise description for the tool action.
+ */
+function getToolDescription(type: string, payload: unknown, result: unknown): string {
+  const p = payload as Record<string, unknown>;
+  const r = result as Record<string, unknown>;
+
+  switch (type) {
+    case 'browser_navigate':
+      return `Navigate to ${p?.url || 'unknown'}`;
+    case 'browser_click':
+      return `Click on "${p?.element || p?.ref}"`;
+    case 'browser_type':
+      return `Type "${String(p?.text || '').slice(0, 20)}${(String(p?.text || '').length > 20) ? '...' : ''}"`;
+    case 'browser_hover':
+      return `Hover on "${p?.element || p?.ref}"`;
+    case 'browser_press_key':
+      return `Press key "${p?.key}"`;
+    case 'browser_wait':
+      return `Wait ${p?.time}s`;
+    case 'browser_screenshot':
+      return 'Take screenshot';
+    case 'browser_snapshot':
+      return `Snapshot: ${r?.title || 'page'}`;
+    case 'browser_new_tab':
+      return `New tab: ${p?.url || 'unknown'}`;
+    case 'browser_switch_tab':
+      return `Switch to tab ${p?.tabId}`;
+    case 'browser_close_tab':
+      return 'Close tab';
+    case 'browser_evaluate':
+      return `Evaluate JS (${String(p?.code || '').length} chars)`;
+    case 'browser_resize_viewport':
+      return `Resize to ${p?.width}x${p?.height}`;
+    case 'browser_upload_file':
+      return `Upload file: ${p?.filePath}`;
+    default:
+      return type.replace('browser_', '').replace(/_/g, ' ');
+  }
 }
 
 /**
