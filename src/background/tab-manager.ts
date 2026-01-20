@@ -6,8 +6,7 @@
 import { log } from '@/utils/logger';
 import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
-
-const STORAGE_KEY = 'connectedTabId';
+import { DEBUGGER } from '@/constants';
 
 export class TabManager {
   private connectedTabId: number | null = null;
@@ -17,15 +16,15 @@ export class TabManager {
    * Initialize tab manager, restoring state from storage.
    */
   async initialize(): Promise<void> {
-    const stored = await chrome.storage.local.get(STORAGE_KEY);
-    if (stored[STORAGE_KEY]) {
-      const tabId = stored[STORAGE_KEY] as number;
+    const stored = await chrome.storage.local.get(DEBUGGER.STORAGE_KEY);
+    if (stored[DEBUGGER.STORAGE_KEY]) {
+      const tabId = stored[DEBUGGER.STORAGE_KEY] as number;
       // Verify tab still exists
       if (await this.tabExists(tabId)) {
         this.connectedTabId = tabId;
         log.info(`Restored connected tab: ${tabId}`);
       } else {
-        await chrome.storage.local.remove(STORAGE_KEY);
+        await chrome.storage.local.remove(DEBUGGER.STORAGE_KEY);
       }
     }
   }
@@ -65,7 +64,7 @@ export class TabManager {
       await this.attachDebugger(tabId);
 
       this.connectedTabId = tabId;
-      await chrome.storage.local.set({ [STORAGE_KEY]: tabId });
+      await chrome.storage.local.set({ [DEBUGGER.STORAGE_KEY]: tabId });
 
       // Get tab info for logging
       const tab = await chrome.tabs.get(tabId);
@@ -92,7 +91,7 @@ export class TabManager {
     await this.detachDebugger();
 
     this.connectedTabId = null;
-    await chrome.storage.local.remove(STORAGE_KEY);
+    await chrome.storage.local.remove(DEBUGGER.STORAGE_KEY);
 
     log.info(`Disconnected from tab: ${tabId}`);
     await logTab('tab_disconnect', `Disconnected from tab ${tabId}`, true, { tabId });
@@ -142,7 +141,7 @@ export class TabManager {
 
     try {
       log.info(`Attaching debugger to tab ${tabId}...`);
-      await chrome.debugger.attach({ tabId }, '1.3');
+      await chrome.debugger.attach({ tabId }, DEBUGGER.PROTOCOL_VERSION);
       this.debuggerAttached = true;
       log.info(`Debugger attached to tab ${tabId}`);
     } catch (error) {

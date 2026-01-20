@@ -1,6 +1,6 @@
 {
   "name": "agent-jake-browser-mcp-extension",
-  "version": "1.0.20",
+  "version": "1.0.22",
   "description": "Browser automation extension for AI agents via Model Context Protocol",
   "type": "module",
   "scripts": {

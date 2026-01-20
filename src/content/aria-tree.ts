@@ -6,55 +6,15 @@
 import type { AriaNode, Snapshot } from '@/types/messages';
 import { CONFIG } from '@/types/config';
 import { buildSelector } from './selector';
-
-// Roles that can have checked state
-const CHECKABLE_ROLES = ['checkbox', 'radio', 'menuitemcheckbox', 'menuitemradio', 'switch'];
-
-// Roles that can be disabled
-const DISABLEABLE_ROLES = ['button', 'textbox', 'checkbox', 'radio', 'combobox', 'listbox', 'slider', 'spinbutton'];
-
-// Roles that can be expanded
-const EXPANDABLE_ROLES = ['button', 'combobox', 'listbox', 'treeitem', 'row'];
-
-// Roles that have levels
-const LEVELED_ROLES = ['heading', 'treeitem', 'listitem'];
-
-// Roles that can be selected
-const SELECTABLE_ROLES = ['option', 'tab', 'treeitem', 'row', 'cell'];
-
-// Elements that are implicitly interactive
-const INTERACTIVE_TAGS = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'];
-
-// Tags to role mapping
-const TAG_TO_ROLE: Record<string, string> = {
-  A: 'link',
-  BUTTON: 'button',
-  INPUT: 'textbox',
-  SELECT: 'combobox',
-  TEXTAREA: 'textbox',
-  IMG: 'img',
-  H1: 'heading',
-  H2: 'heading',
-  H3: 'heading',
-  H4: 'heading',
-  H5: 'heading',
-  H6: 'heading',
-  NAV: 'navigation',
-  MAIN: 'main',
-  ASIDE: 'complementary',
-  HEADER: 'banner',
-  FOOTER: 'contentinfo',
-  FORM: 'form',
-  TABLE: 'table',
-  TR: 'row',
-  TH: 'columnheader',
-  TD: 'cell',
-  UL: 'list',
-  OL: 'list',
-  LI: 'listitem',
-  ARTICLE: 'article',
-  SECTION: 'region',
-};
+import {
+  CHECKABLE_ROLES,
+  DISABLEABLE_ROLES,
+  EXPANDABLE_ROLES,
+  LEVELED_ROLES,
+  SELECTABLE_ROLES,
+  INTERACTIVE_TAGS,
+  TAG_TO_ROLE,
+} from './aria/roles';
 
 let currentGeneration = 0;
 let currentSnapshot: Snapshot | null = null;

@@ -18,6 +18,7 @@ import {
   isElementClickable,
 } from './selector';
 import type { ContentScriptRequest, ContentScriptResponse, Coordinates } from '@/types/messages';
+import { TIMEOUTS, getHighlightCSS } from '@/constants';
 import { CONFIG } from '@/types/config';
 
 // Visual highlight overlay
@@ -262,28 +263,17 @@ async function handleHighlight(payload: { selector: string }): Promise<void> {
   const rect = element.getBoundingClientRect();
 
   highlightOverlay = document.createElement('div');
-  highlightOverlay.style.cssText = `
-    position: fixed;
-    top: ${rect.top}px;
-    left: ${rect.left}px;
-    width: ${rect.width}px;
-    height: ${rect.height}px;
-    border: 3px solid #ff4444;
-    background: rgba(255, 68, 68, 0.2);
-    pointer-events: none;
-    z-index: 2147483647;
-    transition: all 0.2s ease;
-  `;
+  highlightOverlay.style.cssText = getHighlightCSS(rect);
 
   document.body.appendChild(highlightOverlay);
 
-  // Remove after 2 seconds
+  // Remove after highlight duration
   setTimeout(() => {
     if (highlightOverlay) {
       highlightOverlay.remove();
       highlightOverlay = null;
     }
-  }, 2000);
+  }, TIMEOUTS.HIGHLIGHT_DURATION);
 }
 
 /**

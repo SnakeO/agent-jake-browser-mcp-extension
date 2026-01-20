@@ -9,96 +9,9 @@ import type { IncomingMessage, OutgoingMessage, Coordinates } from '@/types/mess
 import { CONFIG } from '@/types/config';
 import { log } from '@/utils/logger';
 import { logTool, logError } from './activity-log';
-
-// Input validators using Zod
-const schemas = {
-  browser_navigate: z.object({
-    url: z.string().url(),
-  }),
-
-  browser_click: z.object({
-    ref: z.string().describe('Element reference from snapshot (e.g., s1e42)'),
-    selector: z.string().optional().describe('CSS selector fallback'),
-  }),
-
-  browser_type: z.object({
-    ref: z.string(),
-    text: z.string(),
-    clear: z.boolean().optional().default(false),
-  }),
-
-  browser_hover: z.object({
-    ref: z.string(),
-    selector: z.string().optional(),
-  }),
-
-  browser_drag: z.object({
-    startRef: z.string(),
-    endRef: z.string(),
-  }),
-
-  browser_select_option: z.object({
-    ref: z.string(),
-    value: z.string().optional(),
-    label: z.string().optional(),
-    index: z.number().optional(),
-  }),
-
-  browser_press_key: z.object({
-    key: z.string().describe('Key name like "Enter", "Tab", "ArrowDown", or "a"'),
-  }),
-
-  browser_wait: z.object({
-    time: z.number().min(0).max(30).describe('Time to wait in seconds'),
-  }),
-
-  browser_new_tab: z.object({
-    url: z.string().url(),
-  }),
-
-  browser_switch_tab: z.object({
-    tabId: z.number(),
-  }),
-
-  browser_get_text: z.object({
-    ref: z.string(),
-  }),
-
-  browser_get_attribute: z.object({
-    ref: z.string(),
-    attribute: z.string(),
-  }),
-
-  browser_wait_for_element: z.object({
-    ref: z.string(),
-    timeout: z.number().optional().default(10000),
-  }),
-
-  browser_highlight: z.object({
-    ref: z.string(),
-  }),
-
-  browser_evaluate: z.object({
-    code: z.string(),
-  }),
-
-  browser_evaluate_safe: z.object({
-    code: z.string().describe('JavaScript code to evaluate (CSP-safe via CDP)'),
-  }),
-
-  browser_resize_viewport: z.object({
-    width: z.number().int().min(320).max(3840),
-    height: z.number().int().min(200).max(2160),
-  }),
-
-  browser_upload_file: z.object({
-    ref: z.string().optional(),
-    selector: z.string().optional(),
-    filePath: z.string(),
-  }),
-};
-
-type ToolName = keyof typeof schemas;
+import { getKeyDefinition } from '@/constants/keys';
+import { schemas, type ToolName } from './tools/schemas';
+import { isNavigationError as isNavError } from './tools/utils';
 
 /**
  * Create tool handlers bound to a tab manager.
@@ -139,18 +52,8 @@ export function createToolHandlers(tabManager: TabManager) {
     await sendToContent('waitForDomStable', { timeout: CONFIG.DOM_STABILITY_MS });
   }
 
-  /**
-   * Check if an error is a navigation-related error (BFCache, port closed, etc).
-   * These errors often occur after a successful action that triggers navigation.
-   */
-  function isNavigationError(error: Error): boolean {
-    const msg = error.message.toLowerCase();
-    return msg.includes('back/forward cache') ||
-           msg.includes('message channel') ||
-           msg.includes('port') ||
-           msg.includes('closed') ||
-           msg.includes('receiving end does not exist');
-  }
+  // isNavigationError imported from './tools/utils'
+  const isNavigationError = isNavError;
 
   /**
    * Try to wait for DOM stability, handling navigation gracefully.
@@ -466,7 +369,7 @@ export function createToolHandlers(tabManager: TabManager) {
     },
 
     browser_is_visible: async (payload) => {
-      const { ref } = z.object({ ref: z.string() }).parse(payload);
+      const { ref } = schemas.browser_is_visible.parse(payload);
       const selector = await getSelector(ref);
       const visible = await sendToContent<boolean>('isVisible', { selector });
       return { visible };
@@ -486,25 +389,13 @@ export function createToolHandlers(tabManager: TabManager) {
       return { highlighted: ref };
     },
 
+    /**
+     * JavaScript evaluation using CDP Runtime.evaluate.
+     * Uses Chrome DevTools Protocol which bypasses CSP restrictions.
+     */
     browser_evaluate: async (payload) => {
       const { code } = schemas.browser_evaluate.parse(payload);
-      log.info('[browser_evaluate] Evaluating code:', code.substring(0, 50));
-
-      // Use content script messaging to evaluate code in page context
-      const result = await sendToContent<unknown>('evaluate', { code });
-      log.info('[browser_evaluate] Result type:', typeof result);
-      return result;
-    },
-
-    /**
-     * CSP-safe JavaScript evaluation using CDP Runtime.evaluate.
-     * Unlike browser_evaluate (which uses content script eval), this uses
-     * Chrome DevTools Protocol which bypasses CSP restrictions.
-     * Use this on sites with strict Content Security Policy.
-     */
-    browser_evaluate_safe: async (payload) => {
-      const { code } = schemas.browser_evaluate_safe.parse(payload);
-      log.info('[browser_evaluate_safe] Evaluating via CDP:', code.substring(0, 50));
+      log.info('[browser_evaluate] Evaluating via CDP:', code.substring(0, 50));
 
       try {
         const result = await tabManager.sendDebuggerCommand<{
@@ -524,10 +415,10 @@ export function createToolHandlers(tabManager: TabManager) {
           throw new Error(`Evaluation failed: ${errMsg}`);
         }
 
-        log.info('[browser_evaluate_safe] Result type:', result.result?.type);
+        log.info('[browser_evaluate] Result type:', result.result?.type);
         return result.result?.value ?? null;
       } catch (error) {
-        log.error('[browser_evaluate_safe] CDP evaluation failed:', error);
+        log.error('[browser_evaluate] CDP evaluation failed:', error);
         throw error;
       }
     },
@@ -697,8 +588,6 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
     case 'browser_close_tab':
       return 'Close tab';
     case 'browser_evaluate':
-      return `Evaluate JS (${String(p?.code || '').length} chars)`;
-    case 'browser_evaluate_safe':
       return `Evaluate JS via CDP (${String(p?.code || '').length} chars)`;
     case 'browser_get_html':
       return `Get page HTML (${(r?.html as string)?.length || 0} chars)`;
@@ -711,46 +600,4 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
   }
 }
 
-/**
- * Get key definition for keyboard events.
- */
-function getKeyDefinition(key: string): { key: string; code: string; keyCode: number } {
-  // Common key mappings
-  const keyMap: Record<string, { key: string; code: string; keyCode: number }> = {
-    Enter: { key: 'Enter', code: 'Enter', keyCode: 13 },
-    Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
-    Escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
-    Backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
-    Delete: { key: 'Delete', code: 'Delete', keyCode: 46 },
-    ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
-    ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
-    ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
-    ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
-    Home: { key: 'Home', code: 'Home', keyCode: 36 },
-    End: { key: 'End', code: 'End', keyCode: 35 },
-    PageUp: { key: 'PageUp', code: 'PageUp', keyCode: 33 },
-    PageDown: { key: 'PageDown', code: 'PageDown', keyCode: 34 },
-    Space: { key: ' ', code: 'Space', keyCode: 32 },
-  };
-
-  if (keyMap[key]) {
-    return keyMap[key];
-  }
-
-  // Single character
-  if (key.length === 1) {
-    const charCode = key.charCodeAt(0);
-    const code = key.toUpperCase().match(/[A-Z]/)
-      ? `Key${key.toUpperCase()}`
-      : `Digit${key}`;
-
-    return {
-      key,
-      code,
-      keyCode: charCode,
-    };
-  }
-
-  // Default
-  return { key, code: key, keyCode: 0 };
-}
+// getKeyDefinition moved to @/constants/keys
