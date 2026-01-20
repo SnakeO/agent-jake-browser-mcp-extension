@@ -5,6 +5,7 @@
 
 import type { AriaNode, Snapshot } from '@/types/messages';
 import { CONFIG } from '@/types/config';
+import { buildSelector } from './selector';
 
 // Roles that can have checked state
 const CHECKABLE_ROLES = ['checkbox', 'radio', 'menuitemcheckbox', 'menuitemradio', 'switch'];
@@ -434,11 +435,37 @@ function truncateName(name: string): string {
  */
 export function formatSnapshotAsText(snapshot: Snapshot): string {
   const lines: string[] = [];
-  formatNode(snapshot.root, lines, 0);
+  formatNode(snapshot.root, lines, 0, snapshot);
   return lines.join('\n');
 }
 
-function formatNode(node: AriaNode | string, lines: string[], indent: number): void {
+/**
+ * Extract element index from ref string (e.g., "s1e42" -> 42)
+ */
+function getElementIndexFromRef(ref: string): number | null {
+  const match = ref.match(/^s\d+e(\d+)$/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+/**
+ * Build CSS selector for an element from the snapshot.
+ * Returns null if element not found or selector fails.
+ */
+function buildCssSelector(ref: string, snapshot: Snapshot): string | null {
+  const index = getElementIndexFromRef(ref);
+  if (index === null) return null;
+
+  const element = snapshot.elements.get(index);
+  if (!element) return null;
+
+  try {
+    return buildSelector(element);
+  } catch {
+    return null;
+  }
+}
+
+function formatNode(node: AriaNode | string, lines: string[], indent: number, snapshot: Snapshot): void {
   const prefix = '  '.repeat(indent);
 
   if (typeof node === 'string') {
@@ -452,7 +479,7 @@ function formatNode(node: AriaNode | string, lines: string[], indent: number): v
   // Skip generic with no name
   if (node.role === 'generic' && !node.name) {
     for (const child of node.children) {
-      formatNode(child, lines, indent);
+      formatNode(child, lines, indent, snapshot);
     }
     return;
   }
@@ -471,8 +498,13 @@ function formatNode(node: AriaNode | string, lines: string[], indent: number): v
   if (node.selected) line += ' [selected]';
   if (node.level) line += ` [level=${node.level}]`;
 
-  // Add ref
-  line += ` [ref=${node.ref}]`;
+  // Add ref with CSS selector
+  const cssSelector = buildCssSelector(node.ref, snapshot);
+  if (cssSelector) {
+    line += ` [${node.ref}|${cssSelector}]`;
+  } else {
+    line += ` [${node.ref}]`;
+  }
 
   // Handle children
   if (node.children.length === 0 && Object.keys(node.props).length === 0) {
@@ -494,7 +526,7 @@ function formatNode(node: AriaNode | string, lines: string[], indent: number): v
 
     // Add children
     for (const child of node.children) {
-      formatNode(child, lines, indent + 1);
+      formatNode(child, lines, indent + 1, snapshot);
     }
   }
 }

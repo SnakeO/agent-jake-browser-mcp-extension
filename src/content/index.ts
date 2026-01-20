@@ -84,8 +84,25 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
     case 'getPageInfo':
       return handleGetPageInfo();
 
+    case 'evaluate':
+      return handleEvaluate(payload as { code: string });
+
     default:
       throw new Error(`Unknown action: ${action}`);
+  }
+}
+
+/**
+ * Evaluate JavaScript code in the page context.
+ */
+function handleEvaluate(payload: { code: string }): unknown {
+  try {
+    // Use indirect eval to run in global scope
+    // eslint-disable-next-line no-eval
+    const result = (0, eval)(payload.code);
+    return result;
+  } catch (error) {
+    throw new Error(`Evaluation error: ${(error as Error).message}`);
   }
 }
 

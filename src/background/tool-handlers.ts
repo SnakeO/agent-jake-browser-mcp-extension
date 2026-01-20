@@ -17,33 +17,31 @@ const schemas = {
   }),
 
   browser_click: z.object({
-    element: z.string().describe('Human-readable element description'),
     ref: z.string().describe('Element reference from snapshot (e.g., s1e42)'),
+    selector: z.string().optional().describe('CSS selector fallback'),
   }),
 
   browser_type: z.object({
-    element: z.string(),
     ref: z.string(),
     text: z.string(),
-    submit: z.boolean().optional().default(false),
+    clear: z.boolean().optional().default(false),
   }),
 
   browser_hover: z.object({
-    element: z.string(),
     ref: z.string(),
+    selector: z.string().optional(),
   }),
 
   browser_drag: z.object({
-    startElement: z.string(),
     startRef: z.string(),
-    endElement: z.string(),
     endRef: z.string(),
   }),
 
   browser_select_option: z.object({
-    element: z.string(),
     ref: z.string(),
-    values: z.array(z.string()),
+    value: z.string().optional(),
+    label: z.string().optional(),
+    index: z.number().optional(),
   }),
 
   browser_press_key: z.object({
@@ -82,6 +80,10 @@ const schemas = {
 
   browser_evaluate: z.object({
     code: z.string(),
+  }),
+
+  browser_evaluate_safe: z.object({
+    code: z.string().describe('JavaScript code to evaluate (CSP-safe via CDP)'),
   }),
 
   browser_resize_viewport: z.object({
@@ -135,6 +137,46 @@ export function createToolHandlers(tabManager: TabManager) {
    */
   async function waitForStable(): Promise<void> {
     await sendToContent('waitForDomStable', { timeout: CONFIG.DOM_STABILITY_MS });
+  }
+
+  /**
+   * Check if an error is a navigation-related error (BFCache, port closed, etc).
+   * These errors often occur after a successful action that triggers navigation.
+   */
+  function isNavigationError(error: Error): boolean {
+    const msg = error.message.toLowerCase();
+    return msg.includes('back/forward cache') ||
+           msg.includes('message channel') ||
+           msg.includes('port') ||
+           msg.includes('closed') ||
+           msg.includes('receiving end does not exist');
+  }
+
+  /**
+   * Try to wait for DOM stability, handling navigation gracefully.
+   * Returns true if navigated, false if stable on same page.
+   */
+  async function waitForStableOrNavigation(initialUrl: string): Promise<{ navigated: boolean; newUrl?: string }> {
+    const tabId = tabManager.getConnectedTabId();
+    if (!tabId) throw new Error('No tab connected');
+
+    try {
+      await waitForStable();
+      return { navigated: false };
+    } catch (error) {
+      if (isNavigationError(error as Error)) {
+        // Check if navigation actually occurred
+        const currentTab = await chrome.tabs.get(tabId);
+        if (currentTab.url !== initialUrl) {
+          log.info('[waitForStableOrNavigation] Navigation detected - action succeeded');
+          return { navigated: true, newUrl: currentTab.url };
+        }
+        // Same URL but port closed - might be page refresh or form submit
+        log.warn('[waitForStableOrNavigation] Port closed but same URL - assuming success');
+        return { navigated: false };
+      }
+      throw error;
+    }
   }
 
   /**
@@ -258,6 +300,12 @@ export function createToolHandlers(tabManager: TabManager) {
 
     browser_click: async (payload) => {
       const { ref } = schemas.browser_click.parse(payload);
+      const tabId = tabManager.getConnectedTabId();
+      if (!tabId) throw new Error('No tab connected');
+
+      // Capture initial URL to detect navigation
+      const initialTab = await chrome.tabs.get(tabId);
+      const initialUrl = initialTab.url || '';
 
       const selector = await getSelector(ref);
       await sendToContent('scrollIntoView', { selector });
@@ -267,17 +315,27 @@ export function createToolHandlers(tabManager: TabManager) {
         clickable: true,
       });
 
-      // Click sequence: move, down, up
+      // Click sequence: move, down, up (uses CDP, doesn't need content script)
       await dispatchMouseEvent('mouseMoved', coords.x, coords.y);
       await dispatchMouseEvent('mousePressed', coords.x, coords.y, 'left', 1);
       await dispatchMouseEvent('mouseReleased', coords.x, coords.y, 'left', 1);
 
-      await waitForStable();
+      // Wait for stability, handling navigation gracefully
+      const result = await waitForStableOrNavigation(initialUrl);
+      if (result.navigated) {
+        return { clicked: ref, navigated: true, newUrl: result.newUrl };
+      }
       return { clicked: ref };
     },
 
     browser_type: async (payload) => {
-      const { ref, text, submit } = schemas.browser_type.parse(payload);
+      const { ref, text, clear } = schemas.browser_type.parse(payload);
+      const tabId = tabManager.getConnectedTabId();
+      if (!tabId) throw new Error('No tab connected');
+
+      // Capture initial URL (typing can trigger form submission/navigation)
+      const initialTab = await chrome.tabs.get(tabId);
+      const initialUrl = initialTab.url || '';
 
       const selector = await getSelector(ref);
       await sendToContent('scrollIntoView', { selector });
@@ -289,6 +347,16 @@ export function createToolHandlers(tabManager: TabManager) {
       await dispatchMouseEvent('mousePressed', coords.x, coords.y, 'left', 1);
       await dispatchMouseEvent('mouseReleased', coords.x, coords.y, 'left', 1);
 
+      // Clear existing text if requested
+      if (clear) {
+        await dispatchKeyEvent('keyDown', 'Control');
+        await dispatchKeyEvent('keyDown', 'a');
+        await dispatchKeyEvent('keyUp', 'a');
+        await dispatchKeyEvent('keyUp', 'Control');
+        await dispatchKeyEvent('keyDown', 'Backspace');
+        await dispatchKeyEvent('keyUp', 'Backspace');
+      }
+
       // Type each character
       for (const char of text) {
         await dispatchKeyEvent('keyDown', char);
@@ -296,18 +364,17 @@ export function createToolHandlers(tabManager: TabManager) {
         await dispatchKeyEvent('keyUp', char);
       }
 
-      // Submit if requested
-      if (submit) {
-        await dispatchKeyEvent('keyDown', 'Enter');
-        await dispatchKeyEvent('keyUp', 'Enter');
+      // Wait for stability, handling navigation gracefully
+      const result = await waitForStableOrNavigation(initialUrl);
+      if (result.navigated) {
+        return { typed: text, cleared: clear, navigated: true, newUrl: result.newUrl };
       }
-
-      await waitForStable();
-      return { typed: text, submitted: submit };
+      return { typed: text, cleared: clear };
     },
 
     browser_hover: async (payload) => {
-      const { ref } = schemas.browser_hover.parse(payload);
+      const parsed = schemas.browser_hover.parse(payload);
+      const ref = parsed.ref;
 
       const selector = await getSelector(ref);
       await sendToContent('scrollIntoView', { selector });
@@ -320,11 +387,21 @@ export function createToolHandlers(tabManager: TabManager) {
 
     browser_press_key: async (payload) => {
       const { key } = schemas.browser_press_key.parse(payload);
+      const tabId = tabManager.getConnectedTabId();
+      if (!tabId) throw new Error('No tab connected');
+
+      // Capture initial URL (Enter key can submit forms/navigate)
+      const initialTab = await chrome.tabs.get(tabId);
+      const initialUrl = initialTab.url || '';
 
       await dispatchKeyEvent('keyDown', key);
       await dispatchKeyEvent('keyUp', key);
 
-      await waitForStable();
+      // Wait for stability, handling navigation gracefully
+      const result = await waitForStableOrNavigation(initialUrl);
+      if (result.navigated) {
+        return { pressed: key, navigated: true, newUrl: result.newUrl };
+      }
       return { pressed: key };
     },
 
@@ -411,21 +488,71 @@ export function createToolHandlers(tabManager: TabManager) {
 
     browser_evaluate: async (payload) => {
       const { code } = schemas.browser_evaluate.parse(payload);
+      log.info('[browser_evaluate] Evaluating code:', code.substring(0, 50));
 
-      // Use Runtime.evaluate via Chrome Debugger API
-      const result = await tabManager.sendDebuggerCommand<{
-        result: { type: string; value: unknown; description?: string };
-        exceptionDetails?: { text: string };
-      }>('Runtime.evaluate', {
-        expression: code,
-        returnByValue: true,
-      });
+      // Use content script messaging to evaluate code in page context
+      const result = await sendToContent<unknown>('evaluate', { code });
+      log.info('[browser_evaluate] Result type:', typeof result);
+      return result;
+    },
 
-      if (result.exceptionDetails) {
-        throw new Error(`JavaScript error: ${result.exceptionDetails.text}`);
+    /**
+     * CSP-safe JavaScript evaluation using CDP Runtime.evaluate.
+     * Unlike browser_evaluate (which uses content script eval), this uses
+     * Chrome DevTools Protocol which bypasses CSP restrictions.
+     * Use this on sites with strict Content Security Policy.
+     */
+    browser_evaluate_safe: async (payload) => {
+      const { code } = schemas.browser_evaluate_safe.parse(payload);
+      log.info('[browser_evaluate_safe] Evaluating via CDP:', code.substring(0, 50));
+
+      try {
+        const result = await tabManager.sendDebuggerCommand<{
+          result: { type: string; value?: unknown; description?: string };
+          exceptionDetails?: { text: string; exception?: { description: string } };
+        }>('Runtime.evaluate', {
+          expression: code,
+          returnByValue: true,
+          awaitPromise: true,
+        });
+
+        // Check for evaluation errors
+        if (result.exceptionDetails) {
+          const errMsg = result.exceptionDetails.exception?.description ||
+                         result.exceptionDetails.text ||
+                         'Unknown evaluation error';
+          throw new Error(`Evaluation failed: ${errMsg}`);
+        }
+
+        log.info('[browser_evaluate_safe] Result type:', result.result?.type);
+        return result.result?.value ?? null;
+      } catch (error) {
+        log.error('[browser_evaluate_safe] CDP evaluation failed:', error);
+        throw error;
       }
+    },
 
-      return result.result.value;
+    /**
+     * Get page HTML using CDP DOM.getOuterHTML (no JS eval, CSP-safe).
+     * This works on sites that block unsafe-eval in their CSP.
+     */
+    browser_get_html: async () => {
+      log.info('[browser_get_html] Getting HTML via CDP DOM.getOuterHTML');
+
+      // Use CDP DOM.getDocument to get the document node
+      const { root } = await tabManager.sendDebuggerCommand<{ root: { nodeId: number } }>(
+        'DOM.getDocument',
+        { depth: 0 }
+      );
+
+      // Get the outer HTML of the document element
+      const { outerHTML } = await tabManager.sendDebuggerCommand<{ outerHTML: string }>(
+        'DOM.getOuterHTML',
+        { nodeId: root.nodeId }
+      );
+
+      log.info('[browser_get_html] Got HTML, length:', outerHTML.length);
+      return { html: outerHTML };
     },
 
     browser_resize_viewport: async (payload) => {
@@ -491,7 +618,7 @@ export function createToolHandlers(tabManager: TabManager) {
     const { id, type, payload } = message;
     const startTime = performance.now();
 
-    log.info(`Handling tool: ${type}`);
+    log.debug(`[Tool] Received: ${type} (id: ${id})`);
 
     try {
       const handler = handlers[type];
@@ -514,6 +641,8 @@ export function createToolHandlers(tabManager: TabManager) {
       const description = getToolDescription(type, payload, result);
       logTool(type, description, true, durationMs, { payload, result });
 
+      log.info(`[Tool] Completed: ${type} (id: ${id}) - success in ${durationMs}ms`);
+
       return {
         id,
         success: true,
@@ -521,7 +650,7 @@ export function createToolHandlers(tabManager: TabManager) {
       };
     } catch (error) {
       const durationMs = Math.round(performance.now() - startTime);
-      log.error(`Tool ${type} failed:`, error);
+      log.error(`[Tool] Failed: ${type} (id: ${id}) - ${(error as Error).message} in ${durationMs}ms`);
 
       logTool(type, (error as Error).message, false, durationMs, { payload, error: (error as Error).message });
 
@@ -548,11 +677,11 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
     case 'browser_navigate':
       return `Navigate to ${p?.url || 'unknown'}`;
     case 'browser_click':
-      return `Click on "${p?.element || p?.ref}"`;
+      return `Click on "${p?.ref || p?.selector}"`;
     case 'browser_type':
       return `Type "${String(p?.text || '').slice(0, 20)}${(String(p?.text || '').length > 20) ? '...' : ''}"`;
     case 'browser_hover':
-      return `Hover on "${p?.element || p?.ref}"`;
+      return `Hover on "${p?.ref || p?.selector}"`;
     case 'browser_press_key':
       return `Press key "${p?.key}"`;
     case 'browser_wait':
@@ -569,6 +698,10 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return 'Close tab';
     case 'browser_evaluate':
       return `Evaluate JS (${String(p?.code || '').length} chars)`;
+    case 'browser_evaluate_safe':
+      return `Evaluate JS via CDP (${String(p?.code || '').length} chars)`;
+    case 'browser_get_html':
+      return `Get page HTML (${(r?.html as string)?.length || 0} chars)`;
     case 'browser_resize_viewport':
       return `Resize to ${p?.width}x${p?.height}`;
     case 'browser_upload_file':

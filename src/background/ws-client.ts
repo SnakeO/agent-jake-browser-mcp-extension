@@ -35,16 +35,26 @@ export class WebSocketClient {
   }
 
   /**
+   * Reset reconnect counter (call when user initiates new connection).
+   */
+  resetReconnectAttempts(): void {
+    this.reconnectAttempts = 0;
+    log.info('[WS] Reconnect attempts counter reset');
+  }
+
+  /**
    * Connect to the browser-mcp WebSocket server.
    */
   async connect(): Promise<void> {
+    log.info(`[WS] connect() called, current state: ${this.socket?.readyState ?? 'no socket'}, attempts: ${this.reconnectAttempts}`);
+
     if (this.socket?.readyState === WebSocket.OPEN) {
-      log.debug('Already connected');
+      log.debug('[WS] Already connected');
       return;
     }
 
     if (this.isConnecting) {
-      log.debug('Connection in progress');
+      log.debug('[WS] Connection in progress');
       return;
     }
 
@@ -146,9 +156,12 @@ export class WebSocketClient {
    * Handle incoming WebSocket message.
    */
   private async handleMessage(data: string): Promise<void> {
+    let messageId: string | undefined;
+
     try {
       const message = JSON.parse(data) as IncomingMessage;
-      log.debug('Received:', message.type, message.id);
+      messageId = message.id;
+      log.info('[WS] Received message:', message.type, message.id);
 
       if (!this.messageHandler) {
         log.error('No message handler set');
@@ -163,36 +176,55 @@ export class WebSocketClient {
         return;
       }
 
+      log.info('[WS] Calling message handler for:', message.type);
       const response = await this.messageHandler(message);
+      log.info('[WS] Message handler returned, sending response');
       this.send(response);
     } catch (error) {
-      log.error('Failed to handle message:', error);
+      log.error('[WS] Failed to handle message:', error);
+      // Send error response back to server so it doesn't timeout
+      if (messageId) {
+        this.send({
+          id: messageId,
+          success: false,
+          error: {
+            code: 'HANDLER_ERROR',
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
     }
   }
 
   /**
    * Handle disconnection with auto-reconnect.
+   * Uses fixed 5-second interval, no exponential backoff.
+   * Retries indefinitely when MAX_RECONNECT_ATTEMPTS is 0.
    */
   private handleDisconnect(): void {
+    log.info(`[WS] handleDisconnect() - shouldReconnect: ${this.shouldReconnect}, attempts: ${this.reconnectAttempts}/${CONFIG.MAX_RECONNECT_ATTEMPTS || 'unlimited'}`);
+
     if (!this.shouldReconnect) {
       return;
     }
 
-    if (this.reconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) {
-      log.error('Max reconnect attempts reached');
+    // Skip max attempts check if unlimited (0)
+    if (CONFIG.MAX_RECONNECT_ATTEMPTS > 0 && this.reconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) {
+      log.error('[WS] Max reconnect attempts reached');
       logError('ws_reconnect_failed', `Max reconnect attempts reached (${CONFIG.MAX_RECONNECT_ATTEMPTS})`, { attempts: this.reconnectAttempts, maxAttempts: CONFIG.MAX_RECONNECT_ATTEMPTS });
       return;
     }
 
     this.reconnectAttempts++;
-    const delay = CONFIG.RECONNECT_INTERVAL_MS * this.reconnectAttempts;
+    // Fixed interval, no exponential backoff
+    const delay = CONFIG.RECONNECT_INTERVAL_MS;
 
-    log.info(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
-    logConnection('ws_reconnecting', `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`, true, { attempt: this.reconnectAttempts, delayMs: delay });
+    log.info(`[WS] Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts})`);
+    logConnection('ws_reconnecting', `Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts})`, true, { attempt: this.reconnectAttempts, delayMs: delay });
 
     this.reconnectTimer = setTimeout(() => {
       this.connect().catch(error => {
-        log.error('Reconnect failed:', error);
+        log.error('[WS] Reconnect failed:', error);
       });
     }, delay);
   }

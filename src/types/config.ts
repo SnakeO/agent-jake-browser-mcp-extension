@@ -8,8 +8,8 @@ export const CONFIG = {
   WS_HOST: 'localhost',
 
   // Reconnection settings
-  RECONNECT_INTERVAL_MS: 1000,
-  MAX_RECONNECT_ATTEMPTS: 10,
+  RECONNECT_INTERVAL_MS: 5000,  // Check every 5 seconds (fixed, no backoff)
+  MAX_RECONNECT_ATTEMPTS: 0,    // 0 = unlimited retries
 
   // Timeouts
   MESSAGE_TIMEOUT_MS: 30000,

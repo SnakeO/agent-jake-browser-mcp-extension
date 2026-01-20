@@ -39,8 +39,16 @@ export class TabManager {
 
   /**
    * Connect to a specific tab for automation.
+   * If tabUrl is chrome://newtab/, navigates to about:blank first.
    */
-  async connectTab(tabId: number): Promise<void> {
+  async connectTab(tabId: number, tabUrl?: string): Promise<void> {
+    // If tab is chrome://newtab/, navigate to about:blank first
+    // (Chrome blocks extensions from accessing chrome:// URLs)
+    if (tabUrl === 'chrome://newtab/') {
+      await chrome.tabs.update(tabId, { url: 'about:blank' });
+      await this.waitForTabLoad(tabId);
+    }
+
     // Disconnect previous tab if any
     if (this.connectedTabId && this.connectedTabId !== tabId) {
       await this.disconnectTab();
@@ -103,25 +111,83 @@ export class TabManager {
   }
 
   /**
+   * Check if debugger is actually attached to a tab.
+   * Uses chrome.debugger.getTargets() for accurate state.
+   */
+  private async isDebuggerAttached(tabId: number): Promise<boolean> {
+    try {
+      const targets = await chrome.debugger.getTargets();
+      return targets.some(t => t.tabId === tabId && t.attached);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Attach debugger to tab for input simulation.
    */
   private async attachDebugger(tabId: number): Promise<void> {
-    if (this.debuggerAttached) {
+    // Always check actual state, not just our flag
+    const actuallyAttached = await this.isDebuggerAttached(tabId);
+    if (actuallyAttached) {
+      log.debug(`Debugger already attached to tab ${tabId}, skipping attach`);
+      this.debuggerAttached = true;
+      // Still enable domains in case they were disabled
+      await this.enableDebuggerDomains(tabId);
       return;
     }
 
+    // Reset flag before attempting attach
+    this.debuggerAttached = false;
+
     try {
+      log.info(`Attaching debugger to tab ${tabId}...`);
       await chrome.debugger.attach({ tabId }, '1.3');
       this.debuggerAttached = true;
-      log.debug(`Debugger attached to tab ${tabId}`);
+      log.info(`Debugger attached to tab ${tabId}`);
     } catch (error) {
-      // May already be attached
+      // May already be attached by another client
       if ((error as Error).message?.includes('Another debugger')) {
-        log.warn('Debugger already attached by another client');
+        log.warn('Debugger already attached by another client, will try to enable domains anyway');
         this.debuggerAttached = true;
       } else {
+        log.error('Failed to attach debugger:', error);
         throw error;
       }
+    }
+
+    // Always enable domains after attaching or detecting existing attachment
+    // These calls are idempotent (safe to call multiple times)
+    await this.enableDebuggerDomains(tabId);
+  }
+
+  /**
+   * Enable required debugger protocol domains.
+   */
+  private async enableDebuggerDomains(tabId: number): Promise<void> {
+    // Enable Runtime domain for evaluate commands
+    // This must be done before Runtime.evaluate will work
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+      log.info('Runtime domain enabled');
+    } catch (enableError) {
+      log.error('Failed to enable Runtime domain:', enableError);
+    }
+
+    // Enable Page domain for navigation and screenshots
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
+      log.info('Page domain enabled');
+    } catch (enableError) {
+      log.error('Failed to enable Page domain:', enableError);
+    }
+
+    // Enable DOM domain for DOM operations
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'DOM.enable');
+      log.info('DOM domain enabled');
+    } catch (enableError) {
+      log.error('Failed to enable DOM domain:', enableError);
     }
   }
 
@@ -129,39 +195,91 @@ export class TabManager {
    * Detach debugger from tab.
    */
   private async detachDebugger(): Promise<void> {
-    if (!this.debuggerAttached || !this.connectedTabId) {
+    if (!this.connectedTabId) {
       return;
     }
 
+    // Always reset flag
+    this.debuggerAttached = false;
+
     try {
       await chrome.debugger.detach({ tabId: this.connectedTabId });
-      this.debuggerAttached = false;
       log.debug('Debugger detached');
     } catch (error) {
+      // May already be detached
       log.warn('Failed to detach debugger:', error);
     }
   }
 
   /**
+   * Reattach debugger to the connected tab.
+   * Called when debugger is unexpectedly detached.
+   */
+  async reattachDebugger(): Promise<void> {
+    if (!this.connectedTabId) {
+      throw new Error('No tab connected');
+    }
+
+    // Mark as detached so attachDebugger will do full attach
+    this.debuggerAttached = false;
+
+    await this.attachDebugger(this.connectedTabId);
+    log.info(`[TabManager] Debugger reattached to tab ${this.connectedTabId}`);
+  }
+
+  /**
+   * Mark debugger as detached (called from onDetach listener).
+   */
+  markDebuggerDetached(): void {
+    this.debuggerAttached = false;
+  }
+
+  /**
    * Send a debugger command to the connected tab.
+   * Auto-reattaches debugger if it has been detached.
    */
   async sendDebuggerCommand<T>(
     method: string,
-    params?: Record<string, unknown>
+    params?: Record<string, unknown>,
+    timeout: number = 25000 // 25 seconds default timeout (less than WS timeout of 30s)
   ): Promise<T> {
     if (!this.connectedTabId) {
       throw new Error('No tab connected');
     }
 
-    if (!this.debuggerAttached) {
+    // Check actual debugger state (not just our flag) and reattach if needed
+    const attached = await this.isDebuggerAttached(this.connectedTabId);
+    if (!attached) {
+      log.warn(`[sendDebuggerCommand] Debugger detached, reattaching to tab ${this.connectedTabId}...`);
       await this.attachDebugger(this.connectedTabId);
     }
 
-    return chrome.debugger.sendCommand(
+    log.debug(`[sendDebuggerCommand] Executing ${method}`, {
+      tabId: this.connectedTabId,
+      hasParams: params !== undefined,
+    });
+
+    // Wrap Chrome's debugger command in a timeout
+    const commandPromise = chrome.debugger.sendCommand(
       { tabId: this.connectedTabId },
       method,
       params
     ) as Promise<T>;
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`Debugger command timed out after ${timeout}ms: ${method}`));
+      }, timeout);
+    });
+
+    try {
+      const result = await Promise.race([commandPromise, timeoutPromise]);
+      log.debug(`[sendDebuggerCommand] ${method} completed successfully`);
+      return result;
+    } catch (error) {
+      log.error(`[sendDebuggerCommand] ${method} failed:`, error);
+      throw error;
+    }
   }
 
   /**

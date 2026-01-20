@@ -105,11 +105,15 @@ function updateUI(status: Status): void {
  * Sorts tabs: connected first, then active (current) tab, then rest.
  */
 function renderTabList(tabs: TabInfo[]): void {
-  const validTabs = tabs.filter(tab =>
-    tab.url &&
-    !tab.url.startsWith('chrome://') &&
-    !tab.url.startsWith('chrome-extension://')
-  );
+  const validTabs = tabs.filter(tab => {
+    // Allow blank tabs (empty URL, about:blank, or new tab page)
+    if (!tab.url || tab.url === 'about:blank' || tab.url === 'chrome://newtab/') {
+      return true;
+    }
+    // Exclude Chrome internal pages
+    return !tab.url.startsWith('chrome://') &&
+           !tab.url.startsWith('chrome-extension://');
+  });
 
   if (validTabs.length === 0) {
     tabList.innerHTML = '<div style="color: #666; font-size: 13px;">No valid tabs available</div>';
@@ -137,7 +141,7 @@ function renderTabList(tabs: TabInfo[]): void {
     }
 
     return `
-      <div class="tab-item ${tab.connected ? 'active' : ''}" data-tab-id="${tab.id}">
+      <div class="tab-item ${tab.connected ? 'active' : ''}" data-tab-id="${tab.id}" data-tab-url="${tab.url || ''}">
         <img
           class="tab-favicon"
           src="${tab.favIconUrl || 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><rect fill=%22%23666%22 width=%2216%22 height=%2216%22 rx=%222%22/></svg>'}"
@@ -153,7 +157,8 @@ function renderTabList(tabs: TabInfo[]): void {
   tabList.querySelectorAll('.tab-item').forEach(item => {
     item.addEventListener('click', async () => {
       const tabId = parseInt(item.getAttribute('data-tab-id')!, 10);
-      await connectToTab(tabId);
+      const tabUrl = item.getAttribute('data-tab-url') || '';
+      await connectToTab(tabId, tabUrl);
     });
   });
 }
@@ -161,9 +166,10 @@ function renderTabList(tabs: TabInfo[]): void {
 /**
  * Connect to a tab.
  */
-async function connectToTab(tabId: number): Promise<void> {
+async function connectToTab(tabId: number, tabUrl?: string): Promise<void> {
   try {
-    await sendMessage('connectTab', { tabId });
+    // Pass URL to background - it handles chrome://newtab navigation
+    await sendMessage('connectTab', { tabId, tabUrl });
     await refreshStatus();
   } catch (error) {
     console.error('Failed to connect:', error);
@@ -184,12 +190,19 @@ async function disconnect(): Promise<void> {
 }
 
 /**
- * Focus the connected tab.
+ * Focus the connected tab and bring its window to the foreground.
  */
 async function focusConnectedTab(): Promise<void> {
   const status = await sendMessage<Status>('getStatus');
   if (status.tabId) {
+    // Get the tab to find its window
+    const tab = await chrome.tabs.get(status.tabId);
+    // Make the tab active
     await chrome.tabs.update(status.tabId, { active: true });
+    // Bring the window to the foreground
+    if (tab.windowId) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
     window.close();
   }
 }
@@ -295,8 +308,8 @@ async function refreshActivityLog(): Promise<void> {
     const hasChanges = activities.length !== displayedActivityIds.size ||
       activities.some(e => !displayedActivityIds.has(e.id));
 
-    // Skip re-render if nothing changed
-    if (!hasChanges && allActivities.length > 0) {
+    // Skip re-render if nothing changed AND counts match (handles clear case)
+    if (!hasChanges && activities.length === allActivities.length) {
       return;
     }
 
