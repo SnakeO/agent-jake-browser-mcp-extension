@@ -35,6 +35,7 @@ export interface Status {
 }
 
 export type ActivityType = 'connection' | 'tab' | 'tool' | 'error' | 'auth';
+export type ActivityFilter = 'all' | ActivityType;
 
 export interface ActivityEntry {
   id: string;
