@@ -17,8 +17,10 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
-    }
+    },
+    "jsx": "preserve",
+    "jsxImportSource": "vue"
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "src/**/*.vue"],
   "exclude": ["node_modules", "dist", "tests"]
 }
