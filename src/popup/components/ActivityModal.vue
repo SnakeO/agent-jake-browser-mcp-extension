@@ -4,19 +4,10 @@
  * Uses Pinia activity store for state management.
  */
 import { useActivityStore } from '../stores';
-import type { ActivityFilter } from '../types';
+import { ACTIVITY_FILTERS } from '../constants/activityFilters';
 import ActivityEntryComponent from './ActivityEntry.vue';
 
 const activity = useActivityStore();
-
-const filters: Array<{ value: ActivityFilter; label: string }> = [
-  { value: 'all', label: 'All' },
-  { value: 'auth', label: 'Auth' },
-  { value: 'connection', label: 'Connection' },
-  { value: 'tab', label: 'Tab' },
-  { value: 'tool', label: 'Tool' },
-  { value: 'error', label: 'Error' },
-];
 
 function handleBackdropClick(e: MouseEvent) {
   if (e.target === e.currentTarget) {
@@ -40,7 +31,7 @@ function handleBackdropClick(e: MouseEvent) {
 
         <div class="modal-filters">
           <button
-            v-for="f in filters"
+            v-for="f in ACTIVITY_FILTERS"
             :key="f.value"
             class="filter-btn"
             :class="{ active: activity.filter === f.value }"

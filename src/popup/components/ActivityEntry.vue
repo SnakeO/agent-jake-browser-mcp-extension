@@ -4,6 +4,7 @@
  */
 import { ref, computed } from 'vue';
 import type { ActivityEntry } from '../types';
+import { formatTime, formatDuration } from '../composables/useFormatting';
 
 const props = defineProps<{
   entry: ActivityEntry;
@@ -11,22 +12,6 @@ const props = defineProps<{
 }>();
 
 const expanded = ref(false);
-
-function formatTime(timestamp: number): string {
-  const date = new Date(timestamp);
-  return date.toLocaleTimeString('en-US', {
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
-function formatDuration(ms?: number): string {
-  if (ms === undefined) return '';
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
 
 const details = computed(() => {
   if (!props.entry.details) return null;
