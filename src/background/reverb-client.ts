@@ -14,6 +14,26 @@ import { ConnectionStateManager, ConnectionState, ErrorCodes } from './connectio
 // Make Pusher available globally for Laravel Echo
 (globalThis as Record<string, unknown>).Pusher = Pusher;
 
+// Patch Pusher.Runtime for service worker compatibility
+// Service workers don't have window.location or localStorage
+const originalGetProtocol = Pusher.Runtime.getProtocol;
+Pusher.Runtime.getProtocol = function() {
+  try {
+    return originalGetProtocol.call(this);
+  } catch {
+    return 'ws:'; // Default to ws: in service worker
+  }
+};
+
+const originalGetLocalStorage = Pusher.Runtime.getLocalStorage;
+Pusher.Runtime.getLocalStorage = function() {
+  try {
+    return originalGetLocalStorage.call(this);
+  } catch {
+    return undefined; // No localStorage in service worker
+  }
+};
+
 export interface BrowserCommand {
   commandId: string;
   userId: number;
@@ -88,7 +108,7 @@ class ReverbClient {
         forceTLS: false,
         encrypted: false,
         disableStats: true,
-        enabledTransports: ['ws', 'wss'],
+        enabledTransports: ['ws'],
         cluster: 'mt1',
         authEndpoint: `${CONFIG.API_URL}/broadcasting/auth`,
         auth: {
@@ -155,16 +175,27 @@ class ReverbClient {
 
       pusher.connection.bind('connected', () => {
         console.log('[ReverbClient] Pusher connected');
+        this.connectionState.setConnected();
+        this.notifyListeners();
       });
 
       pusher.connection.bind('disconnected', () => {
         console.log('[ReverbClient] Pusher disconnected');
+        this.connectionState.handleError(
+          ErrorCodes.WEBSOCKET_ERROR,
+          'Pusher disconnected'
+        );
         this.notifyListeners();
         this.scheduleReconnect('Pusher disconnected');
       });
 
       pusher.connection.bind('error', (error: Error) => {
         console.error('[ReverbClient] Pusher error:', error);
+        this.connectionState.handleError(
+          ErrorCodes.WEBSOCKET_ERROR,
+          error.message || 'WebSocket error'
+        );
+        this.notifyListeners();
         logActivity({
           type: 'error',
           action: 'reverb_error',

@@ -56,9 +56,15 @@ vi.mock('laravel-echo', () => ({
   default: vi.fn(() => mockEcho),
 }));
 
-// Mock Pusher
+// Mock Pusher with Runtime for service worker compatibility patching
+const mockPusher = vi.fn();
+(mockPusher as Record<string, unknown>).Runtime = {
+  getProtocol: vi.fn(() => 'ws:'),
+  getLocalStorage: vi.fn(() => undefined),
+};
+
 vi.mock('pusher-js', () => ({
-  default: vi.fn(),
+  default: mockPusher,
 }));
 
 describe('ReverbClient', () => {
@@ -399,6 +405,74 @@ describe('ReverbClient', () => {
 
       // Listener should not be called after unsubscribe
       expect(listener).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('connection state events', () => {
+    it('updates state to CONNECTED on pusher connected event', async () => {
+      vi.resetModules();
+      const { reverbClient } = await import('@/background/reverb-client');
+
+      const listener = vi.fn();
+      reverbClient.subscribe(listener);
+
+      await reverbClient.connect(123);
+
+      // Find the 'connected' event handler from pusher.connection.bind calls
+      const bindCalls = mockEcho.connector.pusher.connection.bind.mock.calls;
+      const connectedHandler = bindCalls.find((call: unknown[]) => call[0] === 'connected')?.[1];
+
+      expect(connectedHandler).toBeDefined();
+
+      // Simulate pusher connected event
+      connectedHandler();
+
+      // Should notify listeners
+      expect(listener).toHaveBeenCalled();
+    });
+
+    it('updates state on pusher disconnected event', async () => {
+      vi.resetModules();
+      const { reverbClient } = await import('@/background/reverb-client');
+
+      const listener = vi.fn();
+      reverbClient.subscribe(listener);
+
+      await reverbClient.connect(123);
+
+      // Find the 'disconnected' event handler
+      const bindCalls = mockEcho.connector.pusher.connection.bind.mock.calls;
+      const disconnectedHandler = bindCalls.find((call: unknown[]) => call[0] === 'disconnected')?.[1];
+
+      expect(disconnectedHandler).toBeDefined();
+
+      // Simulate pusher disconnected event
+      disconnectedHandler();
+
+      // Should notify listeners
+      expect(listener).toHaveBeenCalled();
+    });
+
+    it('updates state on pusher error event', async () => {
+      vi.resetModules();
+      const { reverbClient } = await import('@/background/reverb-client');
+
+      const listener = vi.fn();
+      reverbClient.subscribe(listener);
+
+      await reverbClient.connect(123);
+
+      // Find the 'error' event handler
+      const bindCalls = mockEcho.connector.pusher.connection.bind.mock.calls;
+      const errorHandler = bindCalls.find((call: unknown[]) => call[0] === 'error')?.[1];
+
+      expect(errorHandler).toBeDefined();
+
+      // Simulate pusher error event
+      errorHandler(new Error('Connection failed'));
+
+      // Should notify listeners
+      expect(listener).toHaveBeenCalled();
     });
   });
 });
