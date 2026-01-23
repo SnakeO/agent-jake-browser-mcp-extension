@@ -28,8 +28,9 @@ const HEARTBEAT_FAILURE_THRESHOLD = 2; // Mark offline after 2 consecutive failu
 export interface AuthState {
   isAuthenticated: boolean;
   user: AuthUser | null;
+  /** Combined connection state (true only if both HTTP and Reverb connected) */
   isConnected: boolean;
-  /** Detailed connection state for UI */
+  /** Reverb WebSocket connection state for SERVER indicator */
   connectionState: ConnectionState;
   /** User-friendly status message */
   statusMessage: string;
@@ -380,17 +381,22 @@ class AuthService {
 
   /**
    * Get current auth state with detailed connection info.
+   * Uses Reverb WebSocket state for the SERVER indicator.
    */
   getState(): AuthState {
-    const connInfo = this.connectionState.getInfo();
+    const reverbState = reverbClient.getConnectionState();
+    const httpConnInfo = this.connectionState.getInfo();
+
     return {
       isAuthenticated: this.user !== null,
       user: this.user,
-      isConnected: this.connectionState.isConnected(),
-      connectionState: connInfo.state,
-      statusMessage: getStateMessage(connInfo),
-      reconnectAttempt: connInfo.reconnectAttempt,
-      lastError: connInfo.lastError?.message || null,
+      // Combined: true only if both HTTP heartbeat and Reverb are connected
+      isConnected: this.connectionState.isConnected() && reverbClient.isConnectedToReverb(),
+      // Use Reverb state for SERVER indicator (what user cares about)
+      connectionState: reverbState,
+      statusMessage: getStateMessage(httpConnInfo),
+      reconnectAttempt: httpConnInfo.reconnectAttempt,
+      lastError: httpConnInfo.lastError?.message || null,
     };
   }
 
