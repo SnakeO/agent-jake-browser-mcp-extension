@@ -80,8 +80,13 @@ src/
       ActivityLog.vue
       ActivityModal.vue
       AuthForm.vue
+      ConnectionStatus.vue
       TabSelector.vue
       UserCard.vue
+    composables/
+      useFormatting.ts
+    constants/
+      activityFilters.ts
     stores/
       activity.ts
       auth.ts

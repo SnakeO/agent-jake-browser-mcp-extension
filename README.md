@@ -34,6 +34,69 @@ Together, these provide a complete browser automation solution enabling AI agent
                                             └──────────────────┘
 ```
 
+### Connection Details
+
+#### 1. AI Agent ↔ MCP Server (stdio/JSON-RPC)
+
+| Aspect | Details |
+|--------|---------|
+| **What** | Claude (or other AI) communicates with a local Node.js MCP server |
+| **How** | The AI spawns the MCP server as a subprocess. Communication happens via stdin/stdout using JSON-RPC 2.0 protocol |
+| **Why** | MCP (Model Context Protocol) is Anthropic's standard for giving AI agents access to external tools. The server translates AI tool calls into browser commands |
+| **Protocol** | JSON-RPC 2.0 over stdio (stdin/stdout pipes) |
+
+#### 2. MCP Server ↔ Chrome Extension (WebSocket)
+
+| Aspect | Details |
+|--------|---------|
+| **What** | The MCP server relays browser commands to the extension |
+| **How** | WebSocket connection on `localhost:8765`. Server sends tool requests, extension returns results |
+| **Why** | WebSockets provide persistent, bidirectional communication. The extension runs in Chrome's isolated context and needs a bridge to receive external commands |
+| **Protocol** | WebSocket with JSON messages |
+| **File** | `src/background/ws-client.ts` |
+
+#### 3. Laravel Server ↔ Chrome Extension (Reverb WebSocket)
+
+| Aspect | Details |
+|--------|---------|
+| **What** | Laravel backend sends browser commands via real-time WebSocket |
+| **How** | Extension authenticates with Sanctum token, subscribes to private channel `extension.{userId}` via Laravel Reverb (Pusher protocol) |
+| **Why** | Enables server-coordinated automation. Commands can be queued in the database and broadcast when the extension is online. Supports multiple extensions per user |
+| **Protocol** | Pusher protocol over WebSocket (port 8085) |
+| **File** | `src/background/reverb-client.ts` |
+
+#### 4. Chrome Extension ↔ Browser Tab (Chrome Debugger API)
+
+| Aspect | Details |
+|--------|---------|
+| **What** | Extension controls the browser tab using Chrome DevTools Protocol (CDP) |
+| **How** | Extension attaches debugger to target tab, sends CDP commands for mouse/keyboard events, JavaScript evaluation, screenshots |
+| **Why** | CDP provides low-level browser control that works on any website without content script limitations. Can simulate real user input |
+| **Protocol** | Chrome Debugger API (CDP wrapper) |
+| **File** | `src/background/tab-manager.ts` |
+
+#### 5. Chrome Extension ↔ Content Script (Chrome Messaging)
+
+| Aspect | Details |
+|--------|---------|
+| **What** | Extension communicates with injected content script for DOM operations |
+| **How** | `chrome.tabs.sendMessage()` / `chrome.runtime.onMessage` |
+| **Why** | Content scripts run in the page context and can build the ARIA accessibility tree, maintain element references, and access DOM APIs not available via CDP |
+| **Protocol** | Chrome extension messaging API |
+| **Files** | `src/content/index.ts`, `src/content/aria-tree.ts` |
+
+### Data Flow Example
+
+**AI requests "click the login button":**
+
+1. Claude sends `tools/call` with `click` tool → MCP Server (stdio)
+2. MCP Server sends `{"tool": "click", "selector": "s1e42"}` → Extension (WebSocket)
+3. Extension looks up element reference `s1e42` → Content Script (messaging)
+4. Content Script returns element coordinates → Extension
+5. Extension sends `Input.dispatchMouseEvent` → Browser Tab (CDP)
+6. Browser executes click, Extension returns success → MCP Server
+7. MCP Server returns result → Claude
+
 ## Features
 
 - **23 Browser Automation Tools** - Navigate, click, type, hover, drag, screenshot, and more
