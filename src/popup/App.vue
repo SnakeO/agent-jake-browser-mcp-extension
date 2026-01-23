@@ -1,41 +1,43 @@
 <script setup lang="ts">
 /**
  * Root Vue component for extension popup.
+ * Uses Pinia stores for centralized state management.
  */
-import { useAuth } from './composables/useAuth';
-import { useStatus } from './composables/useStatus';
-import { useActivity } from './composables/useActivity';
+import { onMounted, onUnmounted } from 'vue';
+import { useAuthStore, useStatusStore, useActivityStore } from './stores';
 import AuthForm from './components/AuthForm.vue';
 import UserCard from './components/UserCard.vue';
 import TabSelector from './components/TabSelector.vue';
 import ActivityLog from './components/ActivityLog.vue';
 import ActivityModal from './components/ActivityModal.vue';
 
-const auth = useAuth();
-const status = useStatus();
-const activity = useActivity();
+const auth = useAuthStore();
+const status = useStatusStore();
+const activity = useActivityStore();
+
+function truncate(str: string, len: number): string {
+  return str.length > len ? str.slice(0, len - 3) + '...' : str;
+}
+
+onMounted(() => {
+  auth.startPolling();
+  status.startPolling();
+  activity.startPolling();
+});
+
+onUnmounted(() => {
+  auth.stopPolling();
+  status.stopPolling();
+  activity.stopPolling();
+});
 </script>
 
 <template>
   <div class="container">
     <!-- Auth Section -->
     <div class="auth-section">
-      <AuthForm
-        v-if="!auth.state.value.isAuthenticated"
-        :loading="auth.loading.value"
-        :error="auth.error.value"
-        @submit="auth.login"
-      />
-      <UserCard
-        v-else
-        :user="auth.state.value.user!"
-        :connection-state="auth.state.value.connectionState"
-        :status-message="auth.state.value.statusMessage"
-        :has-connected-tab="status.hasConnectedTab.value"
-        @logout="auth.logout"
-        @show-tab="status.focusTab"
-        @disconnect="status.disconnectTab"
-      />
+      <AuthForm v-if="!auth.state.isAuthenticated" />
+      <UserCard v-else />
     </div>
 
     <!-- Status Bar -->
@@ -43,14 +45,14 @@ const activity = useActivity();
       <div
         class="status-dot"
         :class="{
-          connected: status.status.value.connected,
-          'tab-connected': status.hasConnectedTab.value && !status.status.value.connected
+          connected: status.status.connected,
+          'tab-connected': status.hasConnectedTab && !status.status.connected
         }"
       ></div>
       <span class="status-text">
-        <template v-if="status.connectedTab.value">
-          {{ status.status.value.connected
-            ? `Connected to "${truncate(status.connectedTab.value.title, 25)}"`
+        <template v-if="status.connectedTab">
+          {{ status.status.connected
+            ? `Connected to "${truncate(status.connectedTab.title, 25)}"`
             : 'Tab connected, waiting for server...'
           }}
         </template>
@@ -62,15 +64,11 @@ const activity = useActivity();
 
     <!-- Tab Connection Section -->
     <div class="section">
-      <TabSelector
-        :tabs="status.sortedTabs.value"
-        :authenticated="auth.state.value.isAuthenticated"
-        @connect="status.connectTab"
-      />
+      <TabSelector />
     </div>
 
     <!-- Connected Tab Actions -->
-    <div v-if="status.hasConnectedTab.value" class="section">
+    <div v-if="status.hasConnectedTab" class="section">
       <button class="btn btn-secondary" @click="status.focusTab">
         Focus Connected Tab
       </button>
@@ -80,22 +78,10 @@ const activity = useActivity();
     </div>
 
     <!-- Activity Log -->
-    <ActivityLog
-      :activities="activity.activities.value"
-      :total="activity.total.value"
-      @refresh="activity.refresh"
-      @clear="activity.clear"
-      @see-more="activity.openModal"
-    />
+    <ActivityLog />
 
     <!-- Activity Modal -->
-    <ActivityModal
-      :open="activity.modalOpen.value"
-      :activities="activity.filtered.value"
-      :filter="activity.filter.value"
-      @close="activity.closeModal"
-      @set-filter="activity.setFilter"
-    />
+    <ActivityModal />
 
     <!-- Footer -->
     <div class="footer">
@@ -104,12 +90,6 @@ const activity = useActivity();
     </div>
   </div>
 </template>
-
-<script lang="ts">
-function truncate(str: string, len: number): string {
-  return str.length > len ? str.slice(0, len - 3) + '...' : str;
-}
-</script>
 
 <style scoped>
 .container {
