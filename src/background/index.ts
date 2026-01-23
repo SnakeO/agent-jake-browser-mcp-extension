@@ -7,10 +7,15 @@
  * which would kill the WebSocket connection to browser-mcp.
  */
 
+// MUST be first import - polyfills window/document for service worker context
+import './sw-polyfill';
+
 import { WebSocketClient } from './ws-client';
 import { TabManager } from './tab-manager';
-import { createToolHandlers } from './tool-handlers';
+import { createToolHandlers, executeToolFromReverb } from './tool-handlers';
 import { activityLog } from './activity-log';
+import { authService, AuthState } from './auth-service';
+import { reverbClient, BrowserCommand } from './reverb-client';
 import { log } from '@/utils/logger';
 import { CONFIG } from '@/types/config';
 
@@ -32,14 +37,23 @@ async function initialize(): Promise<void> {
   tabManager = new TabManager();
   await tabManager.initialize();
 
-  // Create WebSocket client
+  // Create WebSocket client (for local MCP server)
   wsClient = new WebSocketClient(CONFIG.WS_PORT);
 
   // Create tool handlers
   const handleMessage = createToolHandlers(tabManager);
   wsClient.setMessageHandler(handleMessage);
 
-  // Start connection loop
+  // Set up Reverb command handler (for remote Laravel commands)
+  reverbClient.setCommandHandler(async (command: BrowserCommand) => {
+    return executeToolFromReverb(tabManager!, command.type, command.payload);
+  });
+
+  // Initialize auth service (restores session from storage, connects to Reverb if authenticated)
+  await authService.initialize();
+  log.info('Auth service initialized');
+
+  // Start connection loop for local MCP
   startConnectionLoop();
 
   log.info('Extension initialized');
@@ -212,6 +226,21 @@ async function handlePopupMessage(message: {
       return { success: true };
     }
 
+    // Auth actions
+    case 'getAuthState': {
+      return authService.getState();
+    }
+
+    case 'login': {
+      const { email, password } = payload as { email: string; password: string };
+      return await authService.login(email, password);
+    }
+
+    case 'logout': {
+      await authService.logout();
+      return { success: true };
+    }
+
     default:
       throw new Error(`Unknown action: ${action}`);
   }
@@ -252,7 +281,7 @@ chrome.debugger.onDetach.addListener(async (source, reason) => {
 
 // Initialize on load
 console.log('========================================');
-console.log('Agent Jake Browser MCP Extension v1.0.19');
+console.log('Agent Jake Browser MCP Extension v2.0.3');
 console.log('========================================');
 initialize().catch(error => {
   log.error('Failed to initialize:', error);

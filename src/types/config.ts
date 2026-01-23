@@ -3,7 +3,19 @@
  */
 
 export const CONFIG = {
-  // WebSocket connection to browser-mcp server
+  // Laravel API server
+  // For local testing: 'http://localhost:8000'
+  // For remote/ngrok: 'https://jakes.ngrok.pizza'
+  API_URL: 'http://localhost:8000',
+
+  // Laravel Reverb WebSocket server
+  // For local testing: 'localhost'
+  // For remote: must match API domain or use separate ngrok tunnel
+  REVERB_HOST: 'localhost',
+  REVERB_PORT: 8085,
+  REVERB_APP_KEY: 'sortie-extension-key',
+
+  // WebSocket connection to browser-mcp server (local only)
   WS_PORT: 8765,
   WS_HOST: 'localhost',
 

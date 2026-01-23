@@ -11,6 +11,8 @@ import { DEBUGGER } from '@/constants';
 export class TabManager {
   private connectedTabId: number | null = null;
   private debuggerAttached = false;
+  private pendingNewTab: TabInfo | null = null;
+  private newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
 
   /**
    * Initialize tab manager, restoring state from storage.
@@ -351,6 +353,59 @@ export class TabManager {
 
     await chrome.tabs.remove(targetTabId);
     log.info(`Closed tab: ${targetTabId}`);
+  }
+
+  /**
+   * Start listening for new tabs opened during an operation.
+   * Call this before actions that might open new tabs (like clicks).
+   */
+  startNewTabDetection(): void {
+    // Clear any previous state
+    this.pendingNewTab = null;
+
+    // Remove existing listener if any
+    if (this.newTabListener) {
+      chrome.tabs.onCreated.removeListener(this.newTabListener);
+    }
+
+    this.newTabListener = (tab: chrome.tabs.Tab) => {
+      // Only track if we have a connected tab (automation in progress)
+      // and it's not the connected tab itself
+      if (this.connectedTabId && tab.id && tab.id !== this.connectedTabId) {
+        log.info(`[NewTabDetection] New tab opened: ${tab.id}, url: ${tab.url || tab.pendingUrl || 'unknown'}`);
+        this.pendingNewTab = {
+          id: tab.id,
+          url: tab.url || tab.pendingUrl || '',
+          title: tab.title || '',
+          active: tab.active,
+          connected: false,
+        };
+      }
+    };
+
+    chrome.tabs.onCreated.addListener(this.newTabListener);
+    log.debug('[NewTabDetection] Started listening for new tabs');
+  }
+
+  /**
+   * Stop listening for new tabs and return any detected tab.
+   * Returns the new tab info if one was detected, null otherwise.
+   */
+  stopNewTabDetection(): TabInfo | null {
+    if (this.newTabListener) {
+      chrome.tabs.onCreated.removeListener(this.newTabListener);
+      this.newTabListener = null;
+      log.debug('[NewTabDetection] Stopped listening for new tabs');
+    }
+
+    const newTab = this.pendingNewTab;
+    this.pendingNewTab = null;
+
+    if (newTab) {
+      log.info(`[NewTabDetection] Returning detected new tab: ${newTab.id}`);
+    }
+
+    return newTab;
   }
 
   /**

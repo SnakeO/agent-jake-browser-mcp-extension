@@ -5,7 +5,7 @@
 
 import { z } from 'zod';
 import type { TabManager } from './tab-manager';
-import type { IncomingMessage, OutgoingMessage, Coordinates } from '@/types/messages';
+import type { IncomingMessage, OutgoingMessage, Coordinates, ToolName as MessageToolName } from '@/types/messages';
 import { CONFIG } from '@/types/config';
 import { log } from '@/utils/logger';
 import { logTool, logError } from './activity-log';
@@ -210,25 +210,49 @@ export function createToolHandlers(tabManager: TabManager) {
       const initialTab = await chrome.tabs.get(tabId);
       const initialUrl = initialTab.url || '';
 
-      const selector = await getSelector(ref);
-      await sendToContent('scrollIntoView', { selector });
+      // Start listening for new tabs (e.g., target="_blank" links)
+      tabManager.startNewTabDetection();
 
-      const coords = await sendToContent<Coordinates>('getElementCoordinates', {
-        selector,
-        clickable: true,
-      });
+      try {
+        const selector = await getSelector(ref);
+        await sendToContent('scrollIntoView', { selector });
 
-      // Click sequence: move, down, up (uses CDP, doesn't need content script)
-      await dispatchMouseEvent('mouseMoved', coords.x, coords.y);
-      await dispatchMouseEvent('mousePressed', coords.x, coords.y, 'left', 1);
-      await dispatchMouseEvent('mouseReleased', coords.x, coords.y, 'left', 1);
+        const coords = await sendToContent<Coordinates>('getElementCoordinates', {
+          selector,
+          clickable: true,
+        });
 
-      // Wait for stability, handling navigation gracefully
-      const result = await waitForStableOrNavigation(initialUrl);
-      if (result.navigated) {
-        return { clicked: ref, navigated: true, newUrl: result.newUrl };
+        // Click sequence: move, down, up (uses CDP, doesn't need content script)
+        await dispatchMouseEvent('mouseMoved', coords.x, coords.y);
+        await dispatchMouseEvent('mousePressed', coords.x, coords.y, 'left', 1);
+        await dispatchMouseEvent('mouseReleased', coords.x, coords.y, 'left', 1);
+
+        // Wait for stability, handling navigation gracefully
+        const result = await waitForStableOrNavigation(initialUrl);
+
+        // Brief additional wait for potential new tab to register
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        // Check if a new tab was opened
+        const newTab = tabManager.stopNewTabDetection();
+
+        if (result.navigated) {
+          return {
+            clicked: ref,
+            navigated: true,
+            newUrl: result.newUrl,
+            ...(newTab && { newTabOpened: newTab }),
+          };
+        }
+        return {
+          clicked: ref,
+          ...(newTab && { newTabOpened: newTab }),
+        };
+      } catch (error) {
+        // Clean up listener on error
+        tabManager.stopNewTabDetection();
+        throw error;
       }
-      return { clicked: ref };
     },
 
     browser_type: async (payload) => {
@@ -601,3 +625,56 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
 }
 
 // getKeyDefinition moved to @/constants/keys
+
+/**
+ * Execute a tool command from Reverb (remote Laravel server).
+ * This is used when commands come via the WebSocket channel instead of local MCP.
+ */
+export async function executeToolFromReverb(
+  tabManager: TabManager,
+  type: string,
+  payload: Record<string, unknown>
+): Promise<{ success: boolean; result?: unknown; error?: string }> {
+  const startTime = performance.now();
+
+  log.debug(`[Reverb Tool] Received: ${type}`);
+
+  // Create handlers for this execution
+  const handleMessage = createToolHandlers(tabManager);
+
+  try {
+    // Create a fake message ID since Reverb doesn't use the same protocol
+    const fakeId = `reverb_${Date.now()}`;
+
+    const response = await handleMessage({
+      id: fakeId,
+      type: type as MessageToolName,
+      payload,
+    });
+
+    const durationMs = Math.round(performance.now() - startTime);
+
+    if (response.success) {
+      log.info(`[Reverb Tool] Completed: ${type} - success in ${durationMs}ms`);
+      return {
+        success: true,
+        result: response.result,
+      };
+    } else {
+      log.error(`[Reverb Tool] Failed: ${type} - ${response.error?.message} in ${durationMs}ms`);
+      return {
+        success: false,
+        error: response.error?.message || 'Unknown error',
+      };
+    }
+  } catch (error) {
+    const durationMs = Math.round(performance.now() - startTime);
+    const errorMsg = (error as Error).message;
+    log.error(`[Reverb Tool] Exception: ${type} - ${errorMsg} in ${durationMs}ms`);
+
+    return {
+      success: false,
+      error: errorMsg,
+    };
+  }
+}

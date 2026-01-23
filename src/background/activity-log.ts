@@ -153,3 +153,21 @@ export function logError(action: string, description: string, details?: Record<s
     details,
   });
 }
+
+export function logAuth(action: string, description: string, success: boolean, durationMs?: number, details?: Record<string, unknown>): Promise<ActivityEntry> {
+  return activityLog.addEntry({
+    type: 'auth',
+    action,
+    description,
+    success,
+    durationMs,
+    details,
+  });
+}
+
+/**
+ * Generic log function that accepts full entry input.
+ */
+export function logActivity(input: Omit<ActivityEntry, 'id' | 'timestamp'>): Promise<ActivityEntry> {
+  return activityLog.addEntry(input);
+}

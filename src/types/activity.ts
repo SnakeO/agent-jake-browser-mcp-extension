@@ -3,7 +3,7 @@
  * Used for debugging MCP connections, tool executions, and errors.
  */
 
-export type ActivityType = 'connection' | 'tab' | 'tool' | 'error';
+export type ActivityType = 'connection' | 'tab' | 'tool' | 'error' | 'auth';
 
 export interface ActivityEntry {
   /** Unique identifier (crypto.randomUUID) */
