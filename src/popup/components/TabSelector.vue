@@ -1,21 +1,17 @@
 <script setup lang="ts">
 /**
  * Tab list for connecting to browser tabs.
+ * Uses Pinia stores for state management.
  */
+import { useAuthStore, useStatusStore } from '../stores';
 import type { TabInfo } from '../types';
 
-const props = defineProps<{
-  tabs: TabInfo[];
-  authenticated: boolean;
-}>();
-
-const emit = defineEmits<{
-  connect: [tabId: number, tabUrl: string];
-}>();
+const auth = useAuthStore();
+const status = useStatusStore();
 
 function handleTabClick(tab: TabInfo) {
-  if (!props.authenticated) return;
-  emit('connect', tab.id, tab.url || '');
+  if (!auth.state.isAuthenticated) return;
+  status.connectTab(tab.id, tab.url || '');
 }
 
 function truncate(str: string, len: number): string {
@@ -26,16 +22,16 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
 </script>
 
 <template>
-  <div class="tab-selector" :class="{ 'auth-required': !authenticated }">
+  <div class="tab-selector" :class="{ 'auth-required': !auth.state.isAuthenticated }">
     <div class="section-title">Connect to Tab</div>
 
     <div class="tab-list">
-      <div v-if="tabs.length === 0" class="empty-state">
+      <div v-if="status.sortedTabs.length === 0" class="empty-state">
         No valid tabs available
       </div>
 
       <div
-        v-for="tab in tabs"
+        v-for="tab in status.sortedTabs"
         :key="tab.id"
         class="tab-item"
         :class="{ active: tab.connected }"
@@ -52,7 +48,7 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
       </div>
     </div>
 
-    <div v-if="!authenticated" class="auth-overlay">
+    <div v-if="!auth.state.isAuthenticated" class="auth-overlay">
       Sign in to connect
     </div>
   </div>

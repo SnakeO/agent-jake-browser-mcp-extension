@@ -1,24 +1,19 @@
 <script setup lang="ts">
 /**
  * Sign-in form component.
+ * Uses Pinia auth store for state management.
  */
 import { ref } from 'vue';
+import { useAuthStore } from '../stores';
 
-const props = defineProps<{
-  loading: boolean;
-  error: string | null;
-}>();
-
-const emit = defineEmits<{
-  submit: [email: string, password: string];
-}>();
+const auth = useAuthStore();
 
 const email = ref('');
 const password = ref('');
 
 function handleSubmit() {
   if (email.value && password.value) {
-    emit('submit', email.value, password.value);
+    auth.login(email.value, password.value);
   }
 }
 
@@ -41,8 +36,8 @@ function handleKeydown(e: KeyboardEvent) {
         Sign In to Sortie
       </div>
 
-      <div v-if="error" class="auth-error">
-        {{ error }}
+      <div v-if="auth.error" class="auth-error">
+        {{ auth.error }}
       </div>
 
       <div class="input-group">
@@ -73,8 +68,8 @@ function handleKeydown(e: KeyboardEvent) {
 
       <button
         class="btn-signin"
-        :class="{ loading }"
-        :disabled="loading"
+        :class="{ loading: auth.loading }"
+        :disabled="auth.loading"
         @click="handleSubmit"
       >
         <span class="btn-text">Sign In</span>

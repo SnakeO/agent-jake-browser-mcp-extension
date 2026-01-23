@@ -1,25 +1,19 @@
 <script setup lang="ts">
 /**
  * Signed-in user card with actions.
+ * Uses Pinia stores for state management.
  */
 import { computed } from 'vue';
-import type { AuthUser } from '../types';
+import { useAuthStore, useStatusStore } from '../stores';
 
-const props = defineProps<{
-  user: AuthUser;
-  connectionState?: string;
-  statusMessage?: string;
-  hasConnectedTab: boolean;
-}>();
+const auth = useAuthStore();
+const status = useStatusStore();
 
-const emit = defineEmits<{
-  logout: [];
-  showTab: [];
-  disconnect: [];
-}>();
+const user = computed(() => auth.state.user);
 
 const initials = computed(() => {
-  return props.user.name
+  if (!user.value) return '?';
+  return user.value.name
     .split(' ')
     .map(n => n[0])
     .filter(Boolean)
@@ -29,7 +23,7 @@ const initials = computed(() => {
 });
 
 const statusClass = computed(() => {
-  const state = props.connectionState || 'disconnected';
+  const state = auth.state.connectionState || 'disconnected';
   switch (state) {
     case 'connected': return 'online';
     case 'connecting':
@@ -45,30 +39,30 @@ const statusClass = computed(() => {
     <div class="user-info">
       <div class="user-avatar">{{ initials }}</div>
       <div class="user-details">
-        <div class="user-name">{{ user.name }}</div>
-        <div class="user-email">{{ user.email }}</div>
+        <div class="user-name">{{ user?.name }}</div>
+        <div class="user-email">{{ user?.email }}</div>
       </div>
       <div class="user-actions-inline">
         <button
           class="btn-show-tab"
-          :disabled="!hasConnectedTab"
+          :disabled="!status.hasConnectedTab"
           title="Show connected tab"
-          @click="emit('showTab')"
+          @click="status.focusTab"
         >
           Show Tab
         </button>
         <button
           class="btn-disconnect"
-          :disabled="!hasConnectedTab"
+          :disabled="!status.hasConnectedTab"
           title="Disconnect from tab"
-          @click="emit('disconnect')"
+          @click="status.disconnectTab"
         >
           ×
         </button>
         <button
           class="btn-signout-icon"
           title="Sign out"
-          @click="emit('logout')"
+          @click="auth.logout"
         >
           ⏻
         </button>

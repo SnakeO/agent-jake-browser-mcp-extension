@@ -1,22 +1,15 @@
 <script setup lang="ts">
 /**
  * Full activity log modal with filters.
+ * Uses Pinia activity store for state management.
  */
-import type { ActivityEntry, ActivityType } from '../types';
+import { useActivityStore } from '../stores';
+import type { ActivityFilter } from '../types';
 import ActivityEntryComponent from './ActivityEntry.vue';
 
-const props = defineProps<{
-  open: boolean;
-  activities: ActivityEntry[];
-  filter: 'all' | ActivityType;
-}>();
+const activity = useActivityStore();
 
-const emit = defineEmits<{
-  close: [];
-  setFilter: [filter: 'all' | ActivityType];
-}>();
-
-const filters: Array<{ value: 'all' | ActivityType; label: string }> = [
+const filters: Array<{ value: ActivityFilter; label: string }> = [
   { value: 'all', label: 'All' },
   { value: 'auth', label: 'Auth' },
   { value: 'connection', label: 'Connection' },
@@ -27,7 +20,7 @@ const filters: Array<{ value: 'all' | ActivityType; label: string }> = [
 
 function handleBackdropClick(e: MouseEvent) {
   if (e.target === e.currentTarget) {
-    emit('close');
+    activity.closeModal();
   }
 }
 </script>
@@ -35,14 +28,14 @@ function handleBackdropClick(e: MouseEvent) {
 <template>
   <Teleport to="body">
     <div
-      v-if="open"
+      v-if="activity.modalOpen"
       class="modal-overlay"
       @click="handleBackdropClick"
     >
       <div class="modal-content">
         <div class="modal-header">
           <div class="modal-title">Activity Log</div>
-          <button class="modal-close" @click="emit('close')">×</button>
+          <button class="modal-close" @click="activity.closeModal">×</button>
         </div>
 
         <div class="modal-filters">
@@ -50,19 +43,19 @@ function handleBackdropClick(e: MouseEvent) {
             v-for="f in filters"
             :key="f.value"
             class="filter-btn"
-            :class="{ active: filter === f.value }"
-            @click="emit('setFilter', f.value)"
+            :class="{ active: activity.filter === f.value }"
+            @click="activity.setFilter(f.value)"
           >
             {{ f.label }}
           </button>
         </div>
 
         <div class="modal-body">
-          <div v-if="activities.length === 0" class="empty-state">
+          <div v-if="activity.filtered.length === 0" class="empty-state">
             No activity found
           </div>
           <ActivityEntryComponent
-            v-for="entry in activities"
+            v-for="entry in activity.filtered"
             :key="entry.id"
             :entry="entry"
             :expandable="true"

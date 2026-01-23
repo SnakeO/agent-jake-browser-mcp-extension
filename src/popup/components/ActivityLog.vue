@@ -1,22 +1,12 @@
 <script setup lang="ts">
 /**
  * Activity log with header actions.
+ * Uses Pinia activity store for state management.
  */
-import type { ActivityEntry } from '../types';
+import { useActivityStore } from '../stores';
 import ActivityEntryComponent from './ActivityEntry.vue';
 
-const props = defineProps<{
-  activities: ActivityEntry[];
-  total: number;
-}>();
-
-const emit = defineEmits<{
-  refresh: [];
-  clear: [];
-  seeMore: [];
-}>();
-
-const hasMore = props.total > 5;
+const activity = useActivityStore();
 </script>
 
 <template>
@@ -24,32 +14,32 @@ const hasMore = props.total > 5;
     <div class="activity-header">
       <div class="section-title">Activity</div>
       <div class="activity-actions">
-        <button class="activity-btn" title="Clear" @click="emit('clear')">
+        <button class="activity-btn" title="Clear" @click="activity.clear">
           Clear
         </button>
-        <button class="activity-btn" title="Refresh" @click="emit('refresh')">
+        <button class="activity-btn" title="Refresh" @click="activity.refresh()">
           ↻
         </button>
       </div>
     </div>
 
     <div class="activity-log">
-      <div v-if="activities.length === 0" class="empty-state">
+      <div v-if="activity.activities.length === 0" class="empty-state">
         No activity yet...
       </div>
       <ActivityEntryComponent
-        v-for="entry in activities"
+        v-for="entry in activity.activities"
         :key="entry.id"
         :entry="entry"
       />
     </div>
 
     <button
-      v-if="total > 5"
+      v-if="activity.hasMore"
       class="activity-see-more"
-      @click="emit('seeMore')"
+      @click="activity.openModal"
     >
-      See More ({{ total }} total)
+      See More ({{ activity.total }} total)
     </button>
   </div>
 </template>
