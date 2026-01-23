@@ -30,22 +30,36 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
         No valid tabs available
       </div>
 
-      <div
-        v-for="tab in status.sortedTabs"
-        :key="tab.id"
-        class="tab-item"
-        :class="{ active: tab.connected }"
-        @click="handleTabClick(tab)"
-      >
-        <img
-          class="tab-favicon"
-          :src="tab.favIconUrl || defaultFavicon"
-          @error="($event.target as HTMLImageElement).src = defaultFavicon"
+      <!-- When connected, only show the connected tab -->
+      <template v-if="status.hasConnectedTab">
+        <div
+          v-for="tab in status.sortedTabs.filter(t => t.connected)"
+          :key="tab.id"
+          class="tab-item active"
+          @click="status.focusTab()"
         >
-        <span class="tab-title">{{ truncate(tab.title || 'Untitled', 30) }}</span>
-        <span v-if="tab.connected" class="connected-badge">CONNECTED</span>
-        <span v-else-if="tab.active" class="current-badge">CURRENT</span>
-      </div>
+          <div class="tab-checkmark" @click.stop="status.disconnectTab()">✓</div>
+          <span class="tab-title">{{ tab.title || 'Untitled' }}</span>
+        </div>
+      </template>
+
+      <!-- When not connected, show all tabs -->
+      <template v-else>
+        <div
+          v-for="tab in status.sortedTabs"
+          :key="tab.id"
+          class="tab-item"
+          @click="handleTabClick(tab)"
+        >
+          <img
+            class="tab-favicon"
+            :src="tab.favIconUrl || defaultFavicon"
+            @error="($event.target as HTMLImageElement).src = defaultFavicon"
+          >
+          <span class="tab-title">{{ truncate(tab.title || 'Untitled', 30) }}</span>
+          <span v-if="tab.active" class="current-badge">CURRENT</span>
+        </div>
+      </template>
     </div>
 
     <div v-if="!auth.state.isAuthenticated" class="auth-overlay">
@@ -107,31 +121,36 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
   height: 18px;
   border-radius: var(--radius-sm);
   flex-shrink: 0;
-  transition: box-shadow 0.15s ease;
 }
 
-.tab-item.active .tab-favicon {
-  box-shadow: 0 0 0 2px var(--accent-success);
+.tab-checkmark {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  background: var(--accent-success);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: white;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tab-checkmark:hover {
+  background: var(--accent-danger);
 }
 
 .tab-title {
   flex: 1;
+  min-width: 0;
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-primary);
-}
-
-.connected-badge {
-  font-size: 9px;
-  padding: 3px 7px;
-  background: var(--accent-success);
-  color: var(--bg-deepest);
-  border-radius: 20px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
 }
 
 .current-badge {

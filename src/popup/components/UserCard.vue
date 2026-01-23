@@ -4,10 +4,9 @@
  * Uses Pinia stores for state management.
  */
 import { computed } from 'vue';
-import { useAuthStore, useStatusStore } from '../stores';
+import { useAuthStore } from '../stores';
 
 const auth = useAuthStore();
-const status = useStatusStore();
 
 const user = computed(() => auth.state.user);
 
@@ -42,31 +41,12 @@ const statusClass = computed(() => {
         <div class="user-name">{{ user?.name }}</div>
         <div class="user-email">{{ user?.email }}</div>
       </div>
-      <div class="user-actions-inline">
-        <button
-          class="btn-show-tab"
-          :disabled="!status.hasConnectedTab"
-          title="Show connected tab"
-          @click="status.focusTab"
-        >
-          Show Tab
-        </button>
-        <button
-          class="btn-disconnect"
-          :disabled="!status.hasConnectedTab"
-          title="Disconnect from tab"
-          @click="status.disconnectTab"
-        >
-          ×
-        </button>
-        <button
-          class="btn-signout-icon"
-          title="Sign out"
-          @click="auth.logout"
-        >
-          ⏻
-        </button>
-      </div>
+      <button
+        class="btn-signout"
+        @click="auth.logout"
+      >
+        Sign Out
+      </button>
     </div>
   </div>
 </template>
@@ -137,85 +117,24 @@ const statusClass = computed(() => {
   margin-top: 2px;
 }
 
-.user-actions-inline {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.btn-signout {
   margin-left: auto;
-}
-
-.btn-show-tab {
-  padding: 6px 10px;
-  background: var(--accent-primary);
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--bg-deepest);
-  font-size: 10px;
-  font-weight: 600;
-  font-family: var(--font-sans);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-}
-
-.btn-show-tab:hover:not(:disabled) {
-  box-shadow: var(--glow-primary);
-}
-
-.btn-show-tab:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-  box-shadow: none;
-}
-
-.btn-disconnect {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  color: var(--text-tertiary);
-  font-size: 14px;
-  font-family: var(--font-sans);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.btn-disconnect:hover:not(:disabled) {
+  padding: 6px 12px;
   background: var(--accent-danger-dim);
-  border-color: var(--accent-danger);
-  color: var(--accent-danger);
-}
-
-.btn-disconnect:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.btn-signout-icon {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  background: transparent;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--accent-danger);
   border-radius: var(--radius-sm);
-  color: var(--text-tertiary);
+  color: var(--accent-danger);
   font-size: 11px;
+  font-weight: 500;
   font-family: var(--font-sans);
   cursor: pointer;
   transition: all 0.15s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
 
-.btn-signout-icon:hover {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
+.btn-signout:hover {
+  background: var(--accent-danger);
+  border-color: var(--accent-danger);
+  color: white;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.4);
 }
 </style>
