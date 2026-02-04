@@ -87,6 +87,12 @@ src/
       useFormatting.ts
     constants/
       activityFilters.ts
+    preview/
+      index.html
+      main.ts
+      mock-chrome.ts
+      mock-data.ts
+      StateController.vue
     stores/
       activity.ts
       auth.ts
@@ -131,5 +137,6 @@ README.md
 repomix.config.json
 tsconfig.json
 vite.config.ts
+vite.preview.config.ts
 vitest.config.ts
 ```
