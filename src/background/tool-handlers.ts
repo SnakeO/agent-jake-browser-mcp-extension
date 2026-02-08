@@ -1,529 +1,62 @@
 /**
- * Tool handlers for browser automation commands.
- * Each handler implements one MCP tool.
+ * Tool handlers orchestrator for browser automation commands.
+ * Delegates to categorized handler modules.
  */
 
-import { z } from 'zod';
 import type { TabManager } from './tab-manager';
-import type { IncomingMessage, OutgoingMessage, Coordinates, ToolName as MessageToolName } from '@/types/messages';
-import { CONFIG } from '@/types/config';
+import type { IncomingMessage, OutgoingMessage, ToolName as MessageToolName } from '@/types/messages';
 import { log } from '@/utils/logger';
 import { logTool, logError } from './activity-log';
 import { getKeyDefinition } from '@/constants/keys';
-import { schemas, type ToolName } from './tools/schemas';
-import { isNavigationError as isNavError } from './tools/utils';
+import { createToolContext } from './tools/utils';
+import type { HandlerContext } from './tools/handlers';
+import {
+  createNavigationHandlers,
+  createInteractionHandlers,
+  createQueryHandlers,
+  createTabHandlers,
+  createUtilityHandlers,
+} from './tools/handlers';
+
+/**
+ * Build a HandlerContext from a TabManager.
+ * Extends ToolContext with typed mouse/key event wrappers.
+ */
+function buildHandlerContext(tabManager: TabManager): HandlerContext {
+  const ctx = createToolContext(tabManager);
+
+  return {
+    ...ctx,
+
+    async dispatchMouseEventTyped(type, x, y, button = 'left', clickCount = 1) {
+      await ctx.dispatchMouseEvent(type, x, y, button, clickCount);
+    },
+
+    async dispatchKeyEventTyped(type, key, text?) {
+      const keyDef = getKeyDefinition(key);
+      await tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
+        type,
+        key: keyDef.key,
+        code: keyDef.code,
+        windowsVirtualKeyCode: keyDef.keyCode,
+        text: type === 'char' ? text : undefined,
+      });
+    },
+  };
+}
 
 /**
  * Create tool handlers bound to a tab manager.
  */
 export function createToolHandlers(tabManager: TabManager) {
-  /**
-   * Send message to content script in connected tab.
-   */
-  async function sendToContent<T>(
-    action: string,
-    payload: Record<string, unknown> = {}
-  ): Promise<T> {
-    const tabId = tabManager.getConnectedTabId();
-    if (!tabId) {
-      throw new Error('No tab connected. Use the popup to connect a tab first.');
-    }
+  const ctx = buildHandlerContext(tabManager);
 
-    const response = await chrome.tabs.sendMessage(tabId, { action, payload });
-
-    if (!response.success) {
-      throw new Error(response.error || 'Content script error');
-    }
-
-    return response.data as T;
-  }
-
-  /**
-   * Get selector for element ref.
-   */
-  async function getSelector(ref: string): Promise<string> {
-    return sendToContent<string>('getSelector', { ref });
-  }
-
-  /**
-   * Wait for DOM to stabilize after action.
-   */
-  async function waitForStable(): Promise<void> {
-    await sendToContent('waitForDomStable', { timeout: CONFIG.DOM_STABILITY_MS });
-  }
-
-  // isNavigationError imported from './tools/utils'
-  const isNavigationError = isNavError;
-
-  /**
-   * Try to wait for DOM stability, handling navigation gracefully.
-   * Returns true if navigated, false if stable on same page.
-   */
-  async function waitForStableOrNavigation(initialUrl: string): Promise<{ navigated: boolean; newUrl?: string }> {
-    const tabId = tabManager.getConnectedTabId();
-    if (!tabId) throw new Error('No tab connected');
-
-    try {
-      await waitForStable();
-      return { navigated: false };
-    } catch (error) {
-      if (isNavigationError(error as Error)) {
-        // Check if navigation actually occurred
-        const currentTab = await chrome.tabs.get(tabId);
-        if (currentTab.url !== initialUrl) {
-          log.info('[waitForStableOrNavigation] Navigation detected - action succeeded');
-          return { navigated: true, newUrl: currentTab.url };
-        }
-        // Same URL but port closed - might be page refresh or form submit
-        log.warn('[waitForStableOrNavigation] Port closed but same URL - assuming success');
-        return { navigated: false };
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Send mouse event via Chrome Debugger API.
-   */
-  async function dispatchMouseEvent(
-    type: 'mousePressed' | 'mouseReleased' | 'mouseMoved',
-    x: number,
-    y: number,
-    button: 'left' | 'right' | 'middle' = 'left',
-    clickCount = 1
-  ): Promise<void> {
-    await tabManager.sendDebuggerCommand('Input.dispatchMouseEvent', {
-      type,
-      x,
-      y,
-      button,
-      clickCount,
-    });
-  }
-
-  /**
-   * Send keyboard event via Chrome Debugger API.
-   */
-  async function dispatchKeyEvent(
-    type: 'keyDown' | 'keyUp' | 'char',
-    key: string,
-    text?: string
-  ): Promise<void> {
-    const keyDef = getKeyDefinition(key);
-
-    await tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
-      type,
-      key: keyDef.key,
-      code: keyDef.code,
-      windowsVirtualKeyCode: keyDef.keyCode,
-      text: type === 'char' ? text : undefined,
-    });
-  }
-
-  // Tool implementation map
   const handlers: Record<string, (payload: unknown) => Promise<unknown>> = {
-    browser_navigate: async (payload) => {
-      const { url } = schemas.browser_navigate.parse(payload);
-      const tabId = tabManager.getConnectedTabId();
-
-      if (!tabId) {
-        throw new Error('No tab connected');
-      }
-
-      await chrome.tabs.update(tabId, { url });
-
-      // Wait for navigation to complete
-      await new Promise<void>((resolve) => {
-        const listener = (
-          updatedTabId: number,
-          changeInfo: { status?: string }
-        ) => {
-          if (updatedTabId === tabId && changeInfo.status === 'complete') {
-            chrome.tabs.onUpdated.removeListener(listener);
-            resolve();
-          }
-        };
-        chrome.tabs.onUpdated.addListener(listener);
-      });
-
-      return { navigated: url };
-    },
-
-    browser_go_back: async () => {
-      await tabManager.sendDebuggerCommand('Page.navigateToHistoryEntry', {
-        entryId: -1, // This won't work directly
-      });
-      // Actually use history API
-      const tabId = tabManager.getConnectedTabId();
-      if (tabId) {
-        await chrome.tabs.goBack(tabId);
-      }
-      return { success: true };
-    },
-
-    browser_go_forward: async () => {
-      const tabId = tabManager.getConnectedTabId();
-      if (tabId) {
-        await chrome.tabs.goForward(tabId);
-      }
-      return { success: true };
-    },
-
-    browser_reload: async () => {
-      const tabId = tabManager.getConnectedTabId();
-      if (tabId) {
-        await chrome.tabs.reload(tabId);
-        // Wait for reload to complete
-        await new Promise<void>((resolve) => {
-          const listener = (
-            updatedTabId: number,
-            changeInfo: { status?: string }
-          ) => {
-            if (updatedTabId === tabId && changeInfo.status === 'complete') {
-              chrome.tabs.onUpdated.removeListener(listener);
-              resolve();
-            }
-          };
-          chrome.tabs.onUpdated.addListener(listener);
-        });
-      }
-      return { success: true };
-    },
-
-    browser_snapshot: async () => {
-      const snapshot = await sendToContent<string>('generateSnapshot');
-      const { url, title } = await sendToContent<{ url: string; title: string }>('getPageInfo');
-
-      return {
-        url,
-        title,
-        snapshot,
-      };
-    },
-
-    browser_click: async (payload) => {
-      const { ref } = schemas.browser_click.parse(payload);
-      const tabId = tabManager.getConnectedTabId();
-      if (!tabId) throw new Error('No tab connected');
-
-      // Capture initial URL to detect navigation
-      const initialTab = await chrome.tabs.get(tabId);
-      const initialUrl = initialTab.url || '';
-
-      // Start listening for new tabs (e.g., target="_blank" links)
-      tabManager.startNewTabDetection();
-
-      try {
-        const selector = await getSelector(ref);
-        await sendToContent('scrollIntoView', { selector });
-
-        const coords = await sendToContent<Coordinates>('getElementCoordinates', {
-          selector,
-          clickable: true,
-        });
-
-        // Click sequence: move, down, up (uses CDP, doesn't need content script)
-        await dispatchMouseEvent('mouseMoved', coords.x, coords.y);
-        await dispatchMouseEvent('mousePressed', coords.x, coords.y, 'left', 1);
-        await dispatchMouseEvent('mouseReleased', coords.x, coords.y, 'left', 1);
-
-        // Wait for stability, handling navigation gracefully
-        const result = await waitForStableOrNavigation(initialUrl);
-
-        // Brief additional wait for potential new tab to register
-        await new Promise(resolve => setTimeout(resolve, 100));
-
-        // Check if a new tab was opened
-        const newTab = tabManager.stopNewTabDetection();
-
-        if (result.navigated) {
-          return {
-            clicked: ref,
-            navigated: true,
-            newUrl: result.newUrl,
-            ...(newTab && { newTabOpened: newTab }),
-          };
-        }
-        return {
-          clicked: ref,
-          ...(newTab && { newTabOpened: newTab }),
-        };
-      } catch (error) {
-        // Clean up listener on error
-        tabManager.stopNewTabDetection();
-        throw error;
-      }
-    },
-
-    browser_type: async (payload) => {
-      const { ref, text, clear } = schemas.browser_type.parse(payload);
-      const tabId = tabManager.getConnectedTabId();
-      if (!tabId) throw new Error('No tab connected');
-
-      // Capture initial URL (typing can trigger form submission/navigation)
-      const initialTab = await chrome.tabs.get(tabId);
-      const initialUrl = initialTab.url || '';
-
-      const selector = await getSelector(ref);
-      await sendToContent('scrollIntoView', { selector });
-
-      const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector });
-
-      // Click to focus
-      await dispatchMouseEvent('mouseMoved', coords.x, coords.y);
-      await dispatchMouseEvent('mousePressed', coords.x, coords.y, 'left', 1);
-      await dispatchMouseEvent('mouseReleased', coords.x, coords.y, 'left', 1);
-
-      // Clear existing text if requested
-      if (clear) {
-        await dispatchKeyEvent('keyDown', 'Control');
-        await dispatchKeyEvent('keyDown', 'a');
-        await dispatchKeyEvent('keyUp', 'a');
-        await dispatchKeyEvent('keyUp', 'Control');
-        await dispatchKeyEvent('keyDown', 'Backspace');
-        await dispatchKeyEvent('keyUp', 'Backspace');
-      }
-
-      // Type each character
-      for (const char of text) {
-        await dispatchKeyEvent('keyDown', char);
-        await dispatchKeyEvent('char', char, char);
-        await dispatchKeyEvent('keyUp', char);
-      }
-
-      // Wait for stability, handling navigation gracefully
-      const result = await waitForStableOrNavigation(initialUrl);
-      if (result.navigated) {
-        return { typed: text, cleared: clear, navigated: true, newUrl: result.newUrl };
-      }
-      return { typed: text, cleared: clear };
-    },
-
-    browser_hover: async (payload) => {
-      const parsed = schemas.browser_hover.parse(payload);
-      const ref = parsed.ref;
-
-      const selector = await getSelector(ref);
-      await sendToContent('scrollIntoView', { selector });
-
-      const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector });
-      await dispatchMouseEvent('mouseMoved', coords.x, coords.y);
-
-      return { hovered: ref };
-    },
-
-    browser_press_key: async (payload) => {
-      const { key } = schemas.browser_press_key.parse(payload);
-      const tabId = tabManager.getConnectedTabId();
-      if (!tabId) throw new Error('No tab connected');
-
-      // Capture initial URL (Enter key can submit forms/navigate)
-      const initialTab = await chrome.tabs.get(tabId);
-      const initialUrl = initialTab.url || '';
-
-      await dispatchKeyEvent('keyDown', key);
-      await dispatchKeyEvent('keyUp', key);
-
-      // Wait for stability, handling navigation gracefully
-      const result = await waitForStableOrNavigation(initialUrl);
-      if (result.navigated) {
-        return { pressed: key, navigated: true, newUrl: result.newUrl };
-      }
-      return { pressed: key };
-    },
-
-    browser_wait: async (payload) => {
-      const { time } = schemas.browser_wait.parse(payload);
-      await new Promise(resolve => setTimeout(resolve, time * 1000));
-      return { waited: time };
-    },
-
-    browser_screenshot: async () => {
-      const result = await tabManager.sendDebuggerCommand<{ data: string }>(
-        'Page.captureScreenshot',
-        { format: 'png' }
-      );
-
-      return {
-        image: `data:image/png;base64,${result.data}`,
-      };
-    },
-
-    browser_get_console_logs: async () => {
-      // Note: This would require setting up Console domain monitoring
-      // For now, return empty array
-      return { logs: [] };
-    },
-
-    // New features
-    browser_new_tab: async (payload) => {
-      const { url } = schemas.browser_new_tab.parse(payload);
-      const tabInfo = await tabManager.createTab(url, true);
-      return { tab: tabInfo };
-    },
-
-    browser_list_tabs: async () => {
-      const tabs = await tabManager.listTabs();
-      return { tabs };
-    },
-
-    browser_switch_tab: async (payload) => {
-      const { tabId } = schemas.browser_switch_tab.parse(payload);
-      await tabManager.switchTab(tabId);
-      return { switched: tabId };
-    },
-
-    browser_close_tab: async () => {
-      await tabManager.closeTab();
-      return { closed: true };
-    },
-
-    browser_get_text: async (payload) => {
-      const { ref } = schemas.browser_get_text.parse(payload);
-      const selector = await getSelector(ref);
-      const text = await sendToContent<string>('getText', { selector });
-      return { text };
-    },
-
-    browser_get_attribute: async (payload) => {
-      const { ref, attribute } = schemas.browser_get_attribute.parse(payload);
-      const selector = await getSelector(ref);
-      const value = await sendToContent<string | null>('getAttribute', { selector, attribute });
-      return { value };
-    },
-
-    browser_is_visible: async (payload) => {
-      const { ref } = schemas.browser_is_visible.parse(payload);
-      const selector = await getSelector(ref);
-      const visible = await sendToContent<boolean>('isVisible', { selector });
-      return { visible };
-    },
-
-    browser_wait_for_element: async (payload) => {
-      const { ref, timeout } = schemas.browser_wait_for_element.parse(payload);
-      const selector = await getSelector(ref);
-      const found = await sendToContent<boolean>('waitForElement', { selector, timeout });
-      return { found };
-    },
-
-    browser_highlight: async (payload) => {
-      const { ref } = schemas.browser_highlight.parse(payload);
-      const selector = await getSelector(ref);
-      await sendToContent('highlight', { selector });
-      return { highlighted: ref };
-    },
-
-    /**
-     * JavaScript evaluation using CDP Runtime.evaluate.
-     * Uses Chrome DevTools Protocol which bypasses CSP restrictions.
-     */
-    browser_evaluate: async (payload) => {
-      const { code } = schemas.browser_evaluate.parse(payload);
-      log.info('[browser_evaluate] Evaluating via CDP:', code.substring(0, 50));
-
-      try {
-        const result = await tabManager.sendDebuggerCommand<{
-          result: { type: string; value?: unknown; description?: string };
-          exceptionDetails?: { text: string; exception?: { description: string } };
-        }>('Runtime.evaluate', {
-          expression: code,
-          returnByValue: true,
-          awaitPromise: true,
-        });
-
-        // Check for evaluation errors
-        if (result.exceptionDetails) {
-          const errMsg = result.exceptionDetails.exception?.description ||
-                         result.exceptionDetails.text ||
-                         'Unknown evaluation error';
-          throw new Error(`Evaluation failed: ${errMsg}`);
-        }
-
-        log.info('[browser_evaluate] Result type:', result.result?.type);
-        return result.result?.value ?? null;
-      } catch (error) {
-        log.error('[browser_evaluate] CDP evaluation failed:', error);
-        throw error;
-      }
-    },
-
-    /**
-     * Get page HTML using CDP DOM.getOuterHTML (no JS eval, CSP-safe).
-     * This works on sites that block unsafe-eval in their CSP.
-     */
-    browser_get_html: async () => {
-      log.info('[browser_get_html] Getting HTML via CDP DOM.getOuterHTML');
-
-      // Use CDP DOM.getDocument to get the document node
-      const { root } = await tabManager.sendDebuggerCommand<{ root: { nodeId: number } }>(
-        'DOM.getDocument',
-        { depth: 0 }
-      );
-
-      // Get the outer HTML of the document element
-      const { outerHTML } = await tabManager.sendDebuggerCommand<{ outerHTML: string }>(
-        'DOM.getOuterHTML',
-        { nodeId: root.nodeId }
-      );
-
-      log.info('[browser_get_html] Got HTML, length:', outerHTML.length);
-      return { html: outerHTML };
-    },
-
-    browser_resize_viewport: async (payload) => {
-      const { width, height } = schemas.browser_resize_viewport.parse(payload);
-
-      // Use Emulation.setDeviceMetricsOverride to set viewport
-      await tabManager.sendDebuggerCommand('Emulation.setDeviceMetricsOverride', {
-        width,
-        height,
-        deviceScaleFactor: 1,
-        mobile: false,
-      });
-
-      return { width, height };
-    },
-
-    browser_upload_file: async (payload) => {
-      const { ref, selector, filePath } = schemas.browser_upload_file.parse(payload);
-
-      // Get the selector for the file input
-      let targetSelector = selector;
-      if (!targetSelector && ref) {
-        targetSelector = await getSelector(ref);
-      }
-
-      if (!targetSelector) {
-        throw new Error('Either ref or selector must be provided');
-      }
-
-      // Get the document root
-      const doc = await tabManager.sendDebuggerCommand<{ root: { nodeId: number } }>(
-        'DOM.getDocument',
-        {}
-      );
-
-      // Find the file input element
-      const node = await tabManager.sendDebuggerCommand<{ nodeId: number }>(
-        'DOM.querySelector',
-        {
-          nodeId: doc.root.nodeId,
-          selector: targetSelector,
-        }
-      );
-
-      if (!node.nodeId) {
-        throw new Error(`Element not found: ${targetSelector}`);
-      }
-
-      // Set the file on the input
-      await tabManager.sendDebuggerCommand('DOM.setFileInputFiles', {
-        nodeId: node.nodeId,
-        files: [filePath],
-      });
-
-      return { uploaded: true, filePath };
-    },
+    ...createNavigationHandlers(ctx),
+    ...createInteractionHandlers(ctx),
+    ...createQueryHandlers(ctx),
+    ...createTabHandlers(ctx),
+    ...createUtilityHandlers(ctx),
   };
 
   /**
@@ -552,7 +85,6 @@ export function createToolHandlers(tabManager: TabManager) {
       const result = await handler(payload);
       const durationMs = Math.round(performance.now() - startTime);
 
-      // Create concise description based on tool type
       const description = getToolDescription(type, payload, result);
       logTool(type, description, true, durationMs, { payload, result });
 
@@ -624,11 +156,8 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
   }
 }
 
-// getKeyDefinition moved to @/constants/keys
-
 /**
  * Execute a tool command from Reverb (remote Laravel server).
- * This is used when commands come via the WebSocket channel instead of local MCP.
  */
 export async function executeToolFromReverb(
   tabManager: TabManager,
@@ -639,11 +168,9 @@ export async function executeToolFromReverb(
 
   log.debug(`[Reverb Tool] Received: ${type}`);
 
-  // Create handlers for this execution
   const handleMessage = createToolHandlers(tabManager);
 
   try {
-    // Create a fake message ID since Reverb doesn't use the same protocol
     const fakeId = `reverb_${Date.now()}`;
 
     const response = await handleMessage({
