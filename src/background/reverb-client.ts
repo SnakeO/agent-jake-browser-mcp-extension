@@ -5,34 +5,13 @@
  */
 
 import Echo from 'laravel-echo';
-import Pusher from 'pusher-js';
+import type Pusher from 'pusher-js';
+import './pusher-polyfill'; // Must be imported before Echo usage
 import { CONFIG } from '../types/config';
 import { apiClient } from './api-client';
 import { logActivity } from './activity-log';
 import { ConnectionStateManager, ConnectionState, ErrorCodes } from './connection-state';
-
-// Make Pusher available globally for Laravel Echo
-(globalThis as Record<string, unknown>).Pusher = Pusher;
-
-// Patch Pusher.Runtime for service worker compatibility
-// Service workers don't have window.location or localStorage
-const originalGetProtocol = Pusher.Runtime.getProtocol;
-Pusher.Runtime.getProtocol = function() {
-  try {
-    return originalGetProtocol.call(this);
-  } catch {
-    return 'ws:'; // Default to ws: in service worker
-  }
-};
-
-const originalGetLocalStorage = Pusher.Runtime.getLocalStorage;
-Pusher.Runtime.getLocalStorage = function() {
-  try {
-    return originalGetLocalStorage.call(this);
-  } catch {
-    return undefined; // No localStorage in service worker
-  }
-};
+import { CdpProxy } from './cdp-proxy';
 
 export interface BrowserCommand {
   commandId: string;
@@ -51,6 +30,7 @@ class ReverbClient {
   private echo: Echo<'pusher'> | null = null;
   private userId: number | null = null;
   private commandHandler: CommandHandler | null = null;
+  private cdpProxy: CdpProxy | null = null;
   private connectionState: ConnectionStateManager;
   private listeners: Set<(connected: boolean) => void> = new Set();
 
@@ -72,6 +52,13 @@ class ReverbClient {
   }
 
   /**
+   * Set the CDP proxy for handling Stagehand CDP commands.
+   */
+  setCdpProxy(proxy: CdpProxy): void {
+    this.cdpProxy = proxy;
+  }
+
+  /**
    * Connect to Reverb server for a specific user.
    * Implements graceful error handling with automatic reconnection.
    */
@@ -84,7 +71,11 @@ class ReverbClient {
       return;
     }
 
-    if (this.echo && this.userId === userId && this.connectionState.isConnected()) {
+    if (
+      this.echo &&
+      this.userId === userId &&
+      (this.connectionState.isConnected() || this.connectionState.isConnecting())
+    ) {
       console.log('[ReverbClient] Already connected for user', userId);
       return;
     }
@@ -161,6 +152,16 @@ class ReverbClient {
           type: event.type,
           payload: event.payload,
         });
+      });
+
+      // Handle incoming CDP commands (from Stagehand via CDP Bridge)
+      channel.listen('.cdp.command', async (event: {
+        commandId: string;
+        method: string;
+        params: Record<string, unknown>;
+      }) => {
+        console.log('[ReverbClient] Received CDP command:', event.method, event.commandId);
+        await this.handleCdpCommand(event);
       });
 
       // Handle subscription error
@@ -244,65 +245,100 @@ class ReverbClient {
   }
 
   /**
-   * Handle an incoming command.
+   * Execute a command and report the result back to the server.
+   * Shared logic for both browser commands and CDP commands.
    */
-  private async handleCommand(command: BrowserCommand): Promise<void> {
+  private async executeAndReport(
+    commandId: string,
+    action: string,
+    execute: () => Promise<{ success: boolean; result?: unknown; error?: string }>
+  ): Promise<void> {
     const startTime = Date.now();
 
     try {
-      let result: { success: boolean; result?: unknown; error?: string };
+      const result = await execute();
 
-      if (this.commandHandler) {
-        result = await this.commandHandler(command);
+      if (result.error) {
+        await apiClient.sendCommandResponse(
+          commandId,
+          result.success,
+          result.result || {},
+          result.error
+        );
       } else {
-        result = {
-          success: false,
-          error: 'No command handler registered',
-        };
+        await apiClient.sendCommandResponse(
+          commandId,
+          result.success,
+          result.result || {}
+        );
       }
 
-      // Send response back to server
-      await apiClient.sendCommandResponse(
-        command.commandId,
-        result.success,
-        result.result || {},
-        result.error
-      );
-
-      const durationMs = Date.now() - startTime;
-
       logActivity({
-        type: 'tool',
-        action: command.type,
+        type: result.success ? 'tool' : 'error',
+        action,
         description: result.success
-          ? `Command ${command.type} completed`
-          : `Command ${command.type} failed: ${result.error}`,
+          ? `Command ${action} completed`
+          : `Command ${action} failed: ${result.error}`,
         success: result.success,
-        durationMs,
-        details: { commandId: command.commandId },
+        durationMs: Date.now() - startTime,
+        details: { commandId },
       });
-
     } catch (error) {
       const errorMsg = (error as Error).message;
-      console.error('[ReverbClient] Command execution error:', error);
+      console.error(`[ReverbClient] ${action} execution error:`, error);
 
-      // Report error back to server
-      await apiClient.sendCommandResponse(
-        command.commandId,
-        false,
-        {},
-        errorMsg
-      );
+      await apiClient.sendCommandResponse(commandId, false, {}, errorMsg);
 
       logActivity({
         type: 'error',
-        action: command.type,
+        action,
         description: `Command error: ${errorMsg}`,
         success: false,
         durationMs: Date.now() - startTime,
-        details: { commandId: command.commandId },
+        details: { commandId },
       });
     }
+  }
+
+  /**
+   * Handle an incoming command.
+   */
+  private async handleCommand(command: BrowserCommand): Promise<void> {
+    await this.executeAndReport(command.commandId, command.type, async () => {
+      if (!this.commandHandler) {
+        return { success: false, error: 'No command handler registered' };
+      }
+      return this.commandHandler(command);
+    });
+  }
+
+  /**
+   * Handle an incoming CDP command from the Stagehand CDP Bridge.
+   */
+  private async handleCdpCommand(event: {
+    commandId: string;
+    method: string;
+    params: Record<string, unknown>;
+  }): Promise<void> {
+    await this.executeAndReport(event.commandId, `cdp:${event.method}`, async () => {
+      if (!this.cdpProxy) {
+        throw new Error('CDP proxy not initialized');
+      }
+      const result = await this.cdpProxy.handleCommand(event.method, event.params);
+      const normalizedResult =
+        result && typeof result === 'object' && !Array.isArray(result)
+          ? (result as Record<string, unknown>)
+          : {};
+
+      if (Array.isArray(result)) {
+        console.warn('[ReverbClient] Normalizing array CDP result to object for protocol compatibility', {
+          method: event.method,
+          commandId: event.commandId,
+        });
+      }
+
+      return { success: true, result: normalizedResult };
+    });
   }
 
   /**
