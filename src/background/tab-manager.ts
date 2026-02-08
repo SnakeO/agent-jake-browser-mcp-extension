@@ -8,9 +8,17 @@ import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
 import { DEBUGGER } from '@/constants';
 
+export interface CdpStatus {
+  connectedTabId: number | null;
+  debuggerAttached: boolean;
+  canExecuteCdp: boolean;
+  lastCdpError: string | null;
+}
+
 export class TabManager {
   private connectedTabId: number | null = null;
   private debuggerAttached = false;
+  private lastCdpError: string | null = null;
   private pendingNewTab: TabInfo | null = null;
   private newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
 
@@ -36,6 +44,50 @@ export class TabManager {
    */
   getConnectedTabId(): number | null {
     return this.connectedTabId;
+  }
+
+  /**
+   * Return live CDP readiness for diagnostics and preflight checks.
+   * Attempts a self-heal attach when possible.
+   */
+  async getCdpStatus(): Promise<CdpStatus> {
+    const tabId = this.connectedTabId;
+    if (!tabId) {
+      return {
+        connectedTabId: null,
+        debuggerAttached: false,
+        canExecuteCdp: false,
+        lastCdpError: this.lastCdpError ?? 'CDP_NOT_READY: No tab connected',
+      };
+    }
+
+    let attached = await this.isDebuggerAttached(tabId);
+    if (!attached) {
+      try {
+        await this.attachDebugger(tabId);
+        attached = await this.isDebuggerAttached(tabId);
+      } catch (error) {
+        this.recordCdpError(error);
+      }
+    }
+
+    if (!attached) {
+      return {
+        connectedTabId: tabId,
+        debuggerAttached: false,
+        canExecuteCdp: false,
+        lastCdpError: this.lastCdpError ?? `CDP_NOT_READY: Debugger is not attached to tab ${tabId}`,
+      };
+    }
+
+    const probe = await this.probeCdp(tabId);
+
+    return {
+      connectedTabId: tabId,
+      debuggerAttached: true,
+      canExecuteCdp: probe.ok,
+      lastCdpError: probe.error,
+    };
   }
 
   /**
@@ -145,14 +197,19 @@ export class TabManager {
       log.info(`Attaching debugger to tab ${tabId}...`);
       await chrome.debugger.attach({ tabId }, DEBUGGER.PROTOCOL_VERSION);
       this.debuggerAttached = true;
+      this.lastCdpError = null;
       log.info(`Debugger attached to tab ${tabId}`);
     } catch (error) {
       // May already be attached by another client
       if ((error as Error).message?.includes('Another debugger')) {
-        log.warn('Debugger already attached by another client, will try to enable domains anyway');
-        this.debuggerAttached = true;
+        const typedError = new Error(`CDP_DEBUGGER_BUSY: ${(error as Error).message}`);
+        this.debuggerAttached = false;
+        this.recordCdpError(typedError);
+        log.warn('Debugger already attached by another client');
+        throw typedError;
       } else {
         log.error('Failed to attach debugger:', error);
+        this.recordCdpError(error);
         throw error;
       }
     }
@@ -166,29 +223,14 @@ export class TabManager {
    * Enable required debugger protocol domains.
    */
   private async enableDebuggerDomains(tabId: number): Promise<void> {
-    // Enable Runtime domain for evaluate commands
-    // This must be done before Runtime.evaluate will work
-    try {
-      await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
-      log.info('Runtime domain enabled');
-    } catch (enableError) {
-      log.error('Failed to enable Runtime domain:', enableError);
-    }
-
-    // Enable Page domain for navigation and screenshots
-    try {
-      await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
-      log.info('Page domain enabled');
-    } catch (enableError) {
-      log.error('Failed to enable Page domain:', enableError);
-    }
-
-    // Enable DOM domain for DOM operations
-    try {
-      await chrome.debugger.sendCommand({ tabId }, 'DOM.enable');
-      log.info('DOM domain enabled');
-    } catch (enableError) {
-      log.error('Failed to enable DOM domain:', enableError);
+    for (const domain of ['Runtime', 'Page', 'DOM'] as const) {
+      try {
+        await chrome.debugger.sendCommand({ tabId }, `${domain}.enable`);
+        log.info(`${domain} domain enabled`);
+      } catch (enableError) {
+        this.recordCdpError(enableError);
+        throw new Error(`CDP_NOT_READY: Failed to enable ${domain} domain: ${(enableError as Error).message}`);
+      }
     }
   }
 
@@ -233,6 +275,7 @@ export class TabManager {
    */
   markDebuggerDetached(): void {
     this.debuggerAttached = false;
+    this.lastCdpError = 'CDP_DEBUGGER_DETACHED: Debugger detached unexpectedly';
   }
 
   /**
@@ -248,38 +291,77 @@ export class TabManager {
       throw new Error('No tab connected');
     }
 
-    // Check actual debugger state (not just our flag) and reattach if needed
-    const attached = await this.isDebuggerAttached(this.connectedTabId);
-    if (!attached) {
-      log.warn(`[sendDebuggerCommand] Debugger detached, reattaching to tab ${this.connectedTabId}...`);
-      await this.attachDebugger(this.connectedTabId);
+    let retriedAfterDetach = false;
+
+    while (true) {
+      // Check actual debugger state (not just our flag) and reattach if needed
+      const attached = await this.isDebuggerAttached(this.connectedTabId);
+      if (!attached) {
+        log.warn(`[sendDebuggerCommand] Debugger detached, reattaching to tab ${this.connectedTabId}...`);
+        await this.attachDebugger(this.connectedTabId);
+      }
+
+      log.debug(`[sendDebuggerCommand] Executing ${method}`, {
+        tabId: this.connectedTabId,
+        hasParams: params !== undefined,
+      });
+
+      // Wrap Chrome's debugger command in a timeout
+      const commandPromise = chrome.debugger.sendCommand(
+        { tabId: this.connectedTabId },
+        method,
+        params
+      ) as Promise<T>;
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`Debugger command timed out after ${timeout}ms: ${method}`));
+        }, timeout);
+      });
+
+      try {
+        const result = await Promise.race([commandPromise, timeoutPromise]);
+        this.lastCdpError = null;
+        log.debug(`[sendDebuggerCommand] ${method} completed successfully`);
+        return result;
+      } catch (error) {
+        const message = (error as Error)?.message || String(error);
+        this.recordCdpError(error);
+        log.error(`[sendDebuggerCommand] ${method} failed:`, error);
+
+        if (message.includes('Debugger is not attached')) {
+          if (retriedAfterDetach) {
+            throw new Error(`CDP_NOT_READY: ${message}`);
+          }
+
+          retriedAfterDetach = true;
+          await this.attachDebugger(this.connectedTabId);
+          continue;
+        }
+
+        throw error;
+      }
     }
+  }
 
-    log.debug(`[sendDebuggerCommand] Executing ${method}`, {
-      tabId: this.connectedTabId,
-      hasParams: params !== undefined,
-    });
+  private recordCdpError(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.lastCdpError = message;
+  }
 
-    // Wrap Chrome's debugger command in a timeout
-    const commandPromise = chrome.debugger.sendCommand(
-      { tabId: this.connectedTabId },
-      method,
-      params
-    ) as Promise<T>;
-
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        reject(new Error(`Debugger command timed out after ${timeout}ms: ${method}`));
-      }, timeout);
-    });
-
+  private async probeCdp(tabId: number): Promise<{ ok: true; error: null } | { ok: false; error: string }> {
     try {
-      const result = await Promise.race([commandPromise, timeoutPromise]);
-      log.debug(`[sendDebuggerCommand] ${method} completed successfully`);
-      return result;
+      await chrome.debugger.sendCommand(
+        { tabId },
+        'Runtime.evaluate',
+        { expression: '1+1', returnByValue: true }
+      );
+      this.lastCdpError = null;
+      return { ok: true, error: null };
     } catch (error) {
-      log.error(`[sendDebuggerCommand] ${method} failed:`, error);
-      throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      this.recordCdpError(error);
+      return { ok: false, error: message };
     }
   }
 
@@ -411,7 +493,7 @@ export class TabManager {
   /**
    * Wait for a tab to finish loading.
    */
-  private waitForTabLoad(tabId: number): Promise<void> {
+  public waitForTabLoad(tabId: number): Promise<void> {
     return new Promise((resolve) => {
       const listener = (
         updatedTabId: number,
