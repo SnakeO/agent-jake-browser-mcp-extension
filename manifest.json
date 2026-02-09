@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Agent Jake Browser MCP",
-  "version": "2.2.3",
+  "version": "2.3.3",
   "description": "Browser automation extension for AI agents via Model Context Protocol",
   "permissions": [
     "alarms",
     "debugger",
+    "identity",
     "scripting",
     "storage",
     "tabs",

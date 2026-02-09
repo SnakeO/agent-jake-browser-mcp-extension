@@ -32,6 +32,7 @@ export class TabManager {
       // Verify tab still exists
       if (await this.tabExists(tabId)) {
         this.connectedTabId = tabId;
+        await this.setLiveConnectionCloseGuard(tabId, true);
         log.info(`Restored connected tab: ${tabId}`);
       } else {
         await chrome.storage.local.remove(DEBUGGER.STORAGE_KEY);
@@ -123,6 +124,7 @@ export class TabManager {
       // Get tab info for logging
       const tab = await chrome.tabs.get(tabId);
       const title = tab.title || tab.url || `Tab ${tabId}`;
+      await this.setLiveConnectionCloseGuard(tabId, true);
 
       log.info(`Connected to tab: ${tabId}`);
       await logTab('tab_connect', `Connected to: ${title}`, true, { tabId, url: tab.url });
@@ -141,6 +143,7 @@ export class TabManager {
     }
 
     const tabId = this.connectedTabId;
+    await this.setLiveConnectionCloseGuard(tabId, false);
 
     await this.detachDebugger();
 
@@ -438,6 +441,17 @@ export class TabManager {
   }
 
   /**
+   * Re-apply live connection UI on the connected tab after page navigations/reloads.
+   */
+  async reapplyLiveConnectionUi(): Promise<void> {
+    if (!this.connectedTabId) {
+      return;
+    }
+
+    await this.setLiveConnectionCloseGuard(this.connectedTabId, true);
+  }
+
+  /**
    * Start listening for new tabs opened during an operation.
    * Call this before actions that might open new tabs (like clicks).
    */
@@ -506,5 +520,229 @@ export class TabManager {
       };
       chrome.tabs.onUpdated.addListener(listener);
     });
+  }
+
+  /**
+   * Enable or disable a beforeunload confirmation prompt on the target tab.
+   */
+  private async setLiveConnectionCloseGuard(tabId: number, enabled: boolean): Promise<void> {
+    const message = 'A live Agent Jake browser connection is active. Close this tab anyway?';
+
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        args: [enabled, message],
+        func: (guardEnabled: boolean, guardMessage: string) => {
+          const stateKey = '__agentJakeLiveCloseGuardMessage';
+          const handlerKey = '__agentJakeLiveCloseGuardHandler';
+          const bannerKey = '__agentJakeLiveCloseGuardBanner';
+          const bannerMoveHandlerKey = '__agentJakeLiveBannerMoveHandler';
+          const overlayKey = '__agentJakeLiveCloseGuardOverlay';
+          const dismissedKey = '__agentJakeLiveCloseGuardOverlayDismissed';
+          const styleKey = '__agentJakeLiveCloseGuardStyle';
+          const host = window as unknown as Record<string, unknown>;
+          const showOverlay = () => {
+            const overlay = host[overlayKey] as HTMLDivElement | undefined;
+            if (!overlay) return;
+            overlay.classList.remove('agent-jake-live-overlay-hidden');
+            overlay.classList.add('agent-jake-live-overlay-visible');
+          };
+
+          const handler = (event: BeforeUnloadEvent) => {
+            const value = host[stateKey];
+            if (typeof value !== 'string' || value.length === 0) {
+              return;
+            }
+            showOverlay();
+            event.preventDefault();
+            event.returnValue = value;
+            return value;
+          };
+
+          const ensureUi = () => {
+            let styleEl = host[styleKey] as HTMLStyleElement | undefined;
+            if (!styleEl) {
+              styleEl = document.createElement('style');
+              styleEl.id = 'agent-jake-live-close-guard-style';
+              styleEl.textContent = `
+                .agent-jake-live-banner {
+                  position: fixed;
+                  top: 0;
+                  left: 0;
+                  right: 0;
+                  z-index: 2147483647;
+                  background: #111827;
+                  color: #f9fafb;
+                  border-bottom: 1px solid rgba(248, 113, 113, 0.7);
+                  padding: 10px 14px;
+                  text-align: center;
+                  font: 600 12px/1.25 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                  letter-spacing: 0.01em;
+                  box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+                  pointer-events: none;
+                  user-select: none;
+                  transition: opacity 120ms ease, transform 120ms ease;
+                }
+                .agent-jake-live-banner-hidden {
+                  opacity: 0;
+                  transform: translateY(-100%);
+                }
+                .agent-jake-live-overlay {
+                  position: fixed;
+                  inset: 0;
+                  z-index: 2147483646;
+                  background: rgba(7, 11, 22, 0.86);
+                  display: flex;
+                  align-items: center;
+                  justify-content: center;
+                  opacity: 1;
+                  visibility: visible;
+                  pointer-events: auto;
+                  transition: opacity 120ms ease;
+                }
+                .agent-jake-live-overlay-visible {
+                  opacity: 1;
+                  visibility: visible;
+                }
+                .agent-jake-live-overlay-hidden {
+                  opacity: 0;
+                  visibility: hidden;
+                  pointer-events: none;
+                }
+                .agent-jake-live-overlay-card {
+                  background: #111827;
+                  color: #f9fafb;
+                  border: 1px solid rgba(248, 113, 113, 0.75);
+                  border-radius: 14px;
+                  padding: 20px 24px;
+                  min-width: 320px;
+                  max-width: min(88vw, 560px);
+                  text-align: center;
+                  font: 600 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                  box-shadow: 0 16px 36px rgba(0,0,0,0.35);
+                }
+                .agent-jake-live-overlay-title {
+                  font-size: 16px;
+                  margin-bottom: 6px;
+                }
+                .agent-jake-live-overlay-copy {
+                  font-weight: 500;
+                  opacity: 0.9;
+                  margin-bottom: 14px;
+                }
+                .agent-jake-live-overlay-button {
+                  border: 0;
+                  border-radius: 10px;
+                  padding: 10px 14px;
+                  font: 700 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                  background: #ef4444;
+                  color: #fff;
+                  cursor: pointer;
+                }
+              `;
+              document.documentElement.appendChild(styleEl);
+              host[styleKey] = styleEl;
+            }
+
+            let banner = host[bannerKey] as HTMLDivElement | undefined;
+            if (!banner) {
+              banner = document.createElement('div');
+              banner.className = 'agent-jake-live-banner';
+              banner.textContent = 'Agent Jake live connection active';
+              document.documentElement.appendChild(banner);
+              host[bannerKey] = banner;
+            }
+
+            if (typeof host[bannerMoveHandlerKey] !== 'function') {
+              const onMove = (event: MouseEvent) => {
+                const currentBanner = host[bannerKey] as HTMLDivElement | undefined;
+                if (!currentBanner) {
+                  return;
+                }
+
+                const hideThreshold = currentBanner.offsetHeight || 44;
+                if (event.clientY <= hideThreshold) {
+                  currentBanner.classList.add('agent-jake-live-banner-hidden');
+                } else {
+                  currentBanner.classList.remove('agent-jake-live-banner-hidden');
+                }
+              };
+              host[bannerMoveHandlerKey] = onMove;
+              window.addEventListener('mousemove', onMove, { passive: true });
+            }
+
+            let overlay = host[overlayKey] as HTMLDivElement | undefined;
+            if (!overlay) {
+              overlay = document.createElement('div');
+              overlay.className = 'agent-jake-live-overlay agent-jake-live-overlay-visible';
+              overlay.innerHTML = `
+                <div class="agent-jake-live-overlay-card">
+                  <div class="agent-jake-live-overlay-title">Live Agent Connection</div>
+                  <div class="agent-jake-live-overlay-copy">This tab is currently connected for automation.</div>
+                  <button type="button" class="agent-jake-live-overlay-button">Click here to interact with the page</button>
+                </div>
+              `;
+              const button = overlay.querySelector('.agent-jake-live-overlay-button') as HTMLButtonElement | null;
+              if (button) {
+                button.addEventListener('click', () => {
+                  host[dismissedKey] = true;
+                  overlay?.classList.add('agent-jake-live-overlay-hidden');
+                });
+              }
+              document.documentElement.appendChild(overlay);
+              host[overlayKey] = overlay;
+            }
+          };
+
+          if (guardEnabled) {
+            host[stateKey] = guardMessage;
+            ensureUi();
+            host[dismissedKey] = false;
+            showOverlay();
+            if (typeof host[handlerKey] !== 'function') {
+              host[handlerKey] = handler;
+              window.addEventListener('beforeunload', handler);
+            }
+            return;
+          }
+
+          host[stateKey] = '';
+          const existing = host[handlerKey];
+          if (typeof existing === 'function') {
+            window.removeEventListener('beforeunload', existing as EventListener);
+          }
+          host[handlerKey] = null;
+
+          const banner = host[bannerKey] as HTMLDivElement | undefined;
+          if (banner) {
+            banner.remove();
+          }
+          host[bannerKey] = null;
+
+          const moveHandler = host[bannerMoveHandlerKey];
+          if (typeof moveHandler === 'function') {
+            window.removeEventListener('mousemove', moveHandler as EventListener);
+          }
+          host[bannerMoveHandlerKey] = null;
+
+          const overlay = host[overlayKey] as HTMLDivElement | undefined;
+          if (overlay) {
+            overlay.remove();
+          }
+          host[overlayKey] = null;
+
+          host[dismissedKey] = null;
+
+          const style = host[styleKey] as HTMLStyleElement | undefined;
+          if (style) {
+            style.remove();
+          }
+          host[styleKey] = null;
+        },
+      });
+    } catch {
+      // Best effort: restricted pages cannot be scripted.
+    }
   }
 }

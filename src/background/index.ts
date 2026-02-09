@@ -11,6 +11,7 @@
 import './sw-polyfill';
 
 import { WebSocketClient } from './ws-client';
+import { CdpProxy } from './cdp-proxy';
 import { TabManager } from './tab-manager';
 import { createToolHandlers, executeToolFromReverb } from './tool-handlers';
 import { activityLog } from './activity-log';
@@ -36,6 +37,10 @@ async function initialize(): Promise<void> {
   // Create tab manager
   tabManager = new TabManager();
   await tabManager.initialize();
+
+  // Wire CDP proxy so Stagehand CDP commands from Reverb can execute.
+  reverbClient.setCdpProxy(new CdpProxy(tabManager));
+  log.info('[CDP] Proxy initialized for Reverb command handling');
 
   // Create WebSocket client (for local MCP server)
   wsClient = new WebSocketClient(CONFIG.WS_PORT);
@@ -108,6 +113,12 @@ async function tryConnect(): Promise<void> {
     return;
   }
 
+  // Skip if ws-client already has a reconnect scheduled
+  if (wsClient.isReconnecting()) {
+    log.debug('[Loop] Reconnect already scheduled, skipping');
+    return;
+  }
+
   if (!wsConnected) {
     log.info('[Loop] Not connected, attempting WebSocket connect...');
     try {
@@ -131,8 +142,8 @@ async function startConnectionLoop(): Promise<void> {
   // Update keep-alive alarm based on current state
   await updateKeepAliveAlarm();
 
-  // Also poll every 5 seconds as backup (in case alarm fails)
-  setInterval(tryConnect, CONFIG.RECONNECT_INTERVAL_MS);
+  // The ws-client handles its own reconnection via handleDisconnect().
+  // The keep-alive alarm (every 12s) serves as a backup.
 }
 
 /**
@@ -188,6 +199,19 @@ async function handlePopupMessage(message: {
       };
     }
 
+    case 'getCdpStatus': {
+      if (!tabManager) {
+        return {
+          connectedTabId: null,
+          debuggerAttached: false,
+          canExecuteCdp: false,
+          lastCdpError: 'CDP_NOT_READY: Tab manager not initialized',
+        };
+      }
+
+      return await tabManager.getCdpStatus();
+    }
+
     case 'connectTab': {
       const { tabId, tabUrl } = payload as { tabId: number; tabUrl?: string };
       await tabManager?.connectTab(tabId, tabUrl);
@@ -236,6 +260,10 @@ async function handlePopupMessage(message: {
       return await authService.login(email, password);
     }
 
+    case 'googleLogin': {
+      return await authService.googleLogin();
+    }
+
     case 'logout': {
       await authService.logout();
       return { success: true };
@@ -279,9 +307,28 @@ chrome.debugger.onDetach.addListener(async (source, reason) => {
   }
 });
 
+/**
+ * Re-apply live connection guard UI after the connected tab reloads/navigates.
+ */
+chrome.tabs.onUpdated.addListener((updatedTabId, changeInfo) => {
+  if (changeInfo.status !== 'complete') {
+    return;
+  }
+
+  const connectedTabId = tabManager?.getConnectedTabId();
+  if (!connectedTabId || connectedTabId !== updatedTabId) {
+    return;
+  }
+
+  tabManager?.reapplyLiveConnectionUi().catch((error) => {
+    log.warn('[onUpdated] Failed to re-apply live connection UI:', error);
+  });
+});
+
 // Initialize on load
+const extensionVersion = chrome.runtime.getManifest().version;
 console.log('========================================');
-console.log('Agent Jake Browser MCP Extension v2.0.3');
+console.log(`Agent Jake Browser MCP Extension v${extensionVersion}`);
 console.log('========================================');
 initialize().catch(error => {
   log.error('Failed to initialize:', error);
